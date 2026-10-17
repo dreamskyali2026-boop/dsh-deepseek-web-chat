@@ -27,6 +27,35 @@ window.__ModuleLoader__.load({
       retry: '重试',
       openExternal: '在浏览器中打开',
       reload: '刷新',
+      handoff: '接力',
+      'handoff.title': '把这段对话带到 Harness',
+      'handoff.menu.all': '整段对话',
+      'handoff.menu.last': '最后一条回复',
+      'handoff.menu.round': '当前一轮问答',
+      'handoff.menu.selection': '选中片段',
+      'handoff.busy': '正在读取 DeepSeek 对话…',
+      'handoff.done': '已插入当前对话（{count} 条）',
+      'handoff.doneWithTruncation': '已插入当前对话，但对话较长，可能不完整',
+      'handoff.copied': '已复制到剪贴板，请返回对话后粘贴',
+      'handoff.confirm.title': '内容较长，确认插入？',
+      'handoff.confirm.body': '共 {count} 个字符，会占用较多上下文。',
+      'handoff.confirm.ok': '仍然插入',
+      'handoff.cancel': '取消',
+      'handoff.error.noMessages': '没有读到对话内容',
+      'handoff.error.noSelection': '没有选中文字',
+      'handoff.error.timeout': '读取超时，请重试',
+      'handoff.error.unsupported': '当前环境无法读取网页内容',
+      'handoff.error.noSession': '请先在 Harness 打开一个对话',
+      'handoff.error.noComposer': '找不到 Harness 输入框',
+      'handoff.error.failed': '插入失败',
+      'handoff.error.notReady': '页面还没加载好，请稍等',
+      'handoff.role.user': '我',
+      'handoff.role.assistant': 'DeepSeek',
+      'handoff.header': '【需求交接 · 来自 DeepSeek 网页聊天】',
+      'handoff.meta': '时间：{time}　范围：{scope}',
+      'handoff.truncatedNote': '注：对话较长，可能未完整抓取。',
+      'handoff.recordHeading': '## 对话记录',
+      'handoff.selectionHeading': '## 选中片段',
     };
 
     const en = {
@@ -46,6 +75,35 @@ window.__ModuleLoader__.load({
       retry: 'Retry',
       openExternal: 'Open in browser',
       reload: 'Reload',
+      handoff: 'Hand off',
+      'handoff.title': 'Bring this conversation into Harness',
+      'handoff.menu.all': 'Whole conversation',
+      'handoff.menu.last': 'Last reply',
+      'handoff.menu.round': 'Current round',
+      'handoff.menu.selection': 'Selected text',
+      'handoff.busy': 'Reading the DeepSeek conversation…',
+      'handoff.done': 'Added to the current conversation ({count} messages)',
+      'handoff.doneWithTruncation': 'Added, but the conversation was long and may be incomplete',
+      'handoff.copied': 'Copied. Paste it into the conversation.',
+      'handoff.confirm.title': 'Insert a long transcript?',
+      'handoff.confirm.body': '{count} characters will use a lot of context.',
+      'handoff.confirm.ok': 'Insert anyway',
+      'handoff.cancel': 'Cancel',
+      'handoff.error.noMessages': 'No conversation was found',
+      'handoff.error.noSelection': 'No text is selected',
+      'handoff.error.timeout': 'Reading timed out. Try again.',
+      'handoff.error.unsupported': 'This environment cannot read the page',
+      'handoff.error.noSession': 'Open a Harness conversation first',
+      'handoff.error.noComposer': 'The Harness composer is unavailable',
+      'handoff.error.failed': 'Insertion failed',
+      'handoff.error.notReady': 'The page is still loading',
+      'handoff.role.user': 'Me',
+      'handoff.role.assistant': 'DeepSeek',
+      'handoff.header': '[Handoff from DeepSeek Web Chat]',
+      'handoff.meta': 'Time: {time} · Scope: {scope}',
+      'handoff.truncatedNote': 'Note: the conversation was long and may be incomplete.',
+      'handoff.recordHeading': '## Conversation',
+      'handoff.selectionHeading': '## Selected text',
     };
 
     const CSS = `
@@ -60,6 +118,8 @@ window.__ModuleLoader__.load({
   pointer-events: auto;
 }
 .dsh-dsc-bar {
+  position: relative;
+  z-index: 10;
   box-sizing: border-box;
   flex: none;
   display: flex;
@@ -216,6 +276,157 @@ window.__ModuleLoader__.load({
   outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 1px;
 }
+.dsh-dsc-handoff {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+.dsh-dsc-handoff-main {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dsh-dsc-handoff-main:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dsh-dsc-handoff-main:disabled { opacity: 0.6; cursor: default; }
+.dsh-dsc-handoff-main:focus-visible,
+.dsh-dsc-handoff-caret:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+.dsh-dsc-handoff-caret {
+  width: 18px;
+  height: 28px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+.dsh-dsc-handoff-caret:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dsh-dsc-handoff-caret:disabled { opacity: 0.45; cursor: default; }
+.dsh-dsc-handoff-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 1.6px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 24%, transparent);
+  border-top-color: var(--dsw-alias-state-business-primary);
+  border-radius: 50%;
+  animation: dsh-dsc-spin 0.8s linear infinite;
+}
+.dsh-dsc-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 188px;
+  padding: 4px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.dsh-dsc-menu-item {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dsh-dsc-menu-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dsc-menu-check {
+  width: 14px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-state-business-primary);
+}
+.dsh-dsc-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  z-index: 40;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, calc(100% - 32px));
+  padding: 8px 10px 8px 14px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px;
+  line-height: 1.45;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+.dsh-dsc-toast-text { min-width: 0; }
+.dsh-dsc-toast button {
+  height: 26px;
+  flex: none;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dsh-dsc-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 55%, transparent);
+}
+.dsh-dsc-modal-card {
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+}
 .dsh-dsc-seat {
   width: 100%;
   height: 100%;
@@ -327,6 +538,48 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function HandoffGlyph({ size = 14 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true, focusable: false },
+        h('path', {
+          d: 'M4 12h11M11 6l6 6-6 6',
+          stroke: 'currentColor',
+          strokeWidth: 1.8,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+
+    function ChevronDownGlyph({ size = 12 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true, focusable: false },
+        h('path', {
+          d: 'm6 9 6 6 6-6',
+          stroke: 'currentColor',
+          strokeWidth: 2,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+
+    function CheckGlyph({ size = 13 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true, focusable: false },
+        h('path', {
+          d: 'm5 12.5 4.5 4.5L19 7',
+          stroke: 'currentColor',
+          strokeWidth: 2,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+
     function WarningGlyph({ size = 22 }) {
       return h(
         'svg',
@@ -354,6 +607,253 @@ window.__ModuleLoader__.load({
         },
         children,
       );
+    }
+
+    const HANDOFF_LIMIT = 20000;
+    const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
+
+    async function extractInGuest(mode) {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const ITEM = '[data-virtual-list-item-key]';
+      const ASSISTANT = '.ds-assistant-message-main-content';
+      const THINK = '.ds-think-content';
+      const BLOCKS = new Set([
+        'P', 'DIV', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'UL', 'OL', 'LI',
+        'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE', 'TABLE', 'TR', 'HR',
+      ]);
+      const clean = (value) =>
+        String(value || '')
+          .replace(/\u00a0/g, ' ')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+      const textOf = (node) => {
+        if (node === null || node === undefined) return '';
+        if (node.nodeType === 3) return node.nodeValue || '';
+        if (node.nodeType !== 1) return '';
+        const el = node;
+        const tag = el.tagName;
+        if (tag === 'BUTTON' || tag === 'SVG' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'NOSCRIPT') return '';
+        const className = el.getAttribute('class') || '';
+        if (
+          className.indexOf('md-code-block-banner') !== -1 ||
+          className.indexOf('md-code-block-action') !== -1 ||
+          className.indexOf('md-code-block-footer') !== -1 ||
+          className.indexOf('ds-markdown-code-copy-button') !== -1
+        ) {
+          return '';
+        }
+        if (el.getAttribute('aria-hidden') === 'true') return '';
+        if (tag === 'BR') return '\n';
+        if (tag === 'PRE') {
+          const code = el.querySelector('code') || el;
+          const className = code.getAttribute('class') || '';
+          const match = className.match(/language-([\w+#.-]+)/);
+          const body = String(code.innerText || code.textContent || '').replace(/\n+$/, '');
+          return '\n```' + (match ? match[1] : '') + '\n' + body + '\n```\n';
+        }
+        let out = '';
+        for (const child of el.childNodes) out += textOf(child);
+        if (tag === 'LI') return '\n- ' + out.trim() + '\n';
+        if (tag === 'TD' || tag === 'TH') return ' ' + out.trim() + ' |';
+        if (BLOCKS.has(tag)) return '\n' + out + '\n';
+        return out;
+      };
+      const readItem = (el) => {
+        const assistant = el.querySelector(ASSISTANT) || null;
+        if (assistant === null && (el.querySelector(THINK) || null) !== null) return null;
+        const text = clean(textOf(assistant || el));
+        if (text === '') return null;
+        return { role: assistant === null ? 'user' : 'assistant', text };
+      };
+      if (mode === 'selection') {
+        const selection = window.getSelection ? window.getSelection() : null;
+        const selected = clean(selection ? selection.toString() : '');
+        if (selected === '') return { ok: false, reason: 'no-selection' };
+        return { ok: true, messages: [{ role: 'selection', text: selected }], truncated: false, total: 1 };
+      }
+      const first = document.querySelector(ITEM);
+      if (first === null) return { ok: false, reason: 'no-messages' };
+      let scroller = first.parentElement;
+      while (scroller !== null && scroller !== document.body) {
+        const style = getComputedStyle(scroller);
+        if (/(auto|scroll)/.test(style.overflowY) && scroller.scrollHeight > scroller.clientHeight + 8) break;
+        scroller = scroller.parentElement;
+      }
+      if (scroller === null || scroller === document.body) {
+        scroller = document.scrollingElement || document.documentElement;
+      }
+      const messages = [];
+      const indexByKey = new Map();
+      let truncated = false;
+      const capture = () => {
+        for (const el of document.querySelectorAll(ITEM)) {
+          const key = el.getAttribute('data-virtual-list-item-key') || '';
+          const item = readItem(el);
+          if (item === null) continue;
+          if (key !== '' && indexByKey.has(key)) {
+            messages[indexByKey.get(key)] = item;
+            continue;
+          }
+          if (key !== '') indexByKey.set(key, messages.length);
+          messages.push(item);
+        }
+      };
+      const original = scroller.scrollTop;
+      try {
+        let lastHeight = -1;
+        for (let settle = 0; settle < 6; settle += 1) {
+          scroller.scrollTop = 0;
+          await nextFrame();
+          await sleep(120);
+          capture();
+          const height = scroller.scrollHeight;
+          if (height === lastHeight) break;
+          lastHeight = height;
+        }
+        let lastTop = -1;
+        for (let step = 0; step < 140; step += 1) {
+          const max = scroller.scrollHeight - scroller.clientHeight;
+          if (scroller.scrollTop >= max - 2) break;
+          const delta = Math.max(220, Math.floor(scroller.clientHeight * 0.8));
+          scroller.scrollTop = Math.min(max, scroller.scrollTop + delta);
+          await nextFrame();
+          await sleep(60);
+          capture();
+          if (scroller.scrollTop === lastTop) break;
+          lastTop = scroller.scrollTop;
+          if (step === 139) truncated = true;
+        }
+        await sleep(40);
+        capture();
+      } finally {
+        try {
+          scroller.scrollTop = original;
+        } catch (error) {
+          /* Best effort: the page may have re-rendered while collecting. */
+        }
+      }
+      if (messages.length === 0) return { ok: false, reason: 'no-messages' };
+      return { ok: true, messages, truncated, total: messages.length };
+    }
+
+    function selectHandoffMessages(messages, mode) {
+      if (mode === 'last') {
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          if (messages[index].role === 'assistant') return [messages[index]];
+        }
+        return messages.slice(-1);
+      }
+      if (mode === 'round') {
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          if (messages[index].role === 'user') return messages.slice(index);
+        }
+        return messages.slice(-1);
+      }
+      return messages;
+    }
+
+    function formatStamp(date) {
+      const pad = (value) => String(value).padStart(2, '0');
+      return (
+        date.getFullYear() +
+        '-' +
+        pad(date.getMonth() + 1) +
+        '-' +
+        pad(date.getDate()) +
+        ' ' +
+        pad(date.getHours()) +
+        ':' +
+        pad(date.getMinutes())
+      );
+    }
+
+    function formatHandoff(messages, mode, truncated, t) {
+      const lines = [
+        t('handoff.header'),
+        t('handoff.meta', { time: formatStamp(new Date()), scope: t('handoff.menu.' + mode) }),
+      ];
+      if (truncated) lines.push(t('handoff.truncatedNote'));
+      lines.push('');
+      if (mode === 'selection') {
+        lines.push(t('handoff.selectionHeading'), '', messages[0].text);
+      } else {
+        lines.push(t('handoff.recordHeading'), '');
+        for (const message of messages) {
+          lines.push(
+            '### ' + (message.role === 'user' ? t('handoff.role.user') : t('handoff.role.assistant')),
+            '',
+            message.text,
+            '',
+          );
+        }
+      }
+      return lines.join('\n').trim() + '\n';
+    }
+
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (error) {
+        console.warn('DeepSeek chat: clipboard write failed', error);
+      }
+      try {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        const copied = document.execCommand('copy');
+        area.remove();
+        return copied;
+      } catch (error) {
+        console.warn('DeepSeek chat: clipboard fallback failed', error);
+        return false;
+      }
+    }
+
+    function createHandoffDelivery(ctx) {
+      return function deliver(text) {
+        const uiSession = ctx.get('uiSession');
+        const sessionId =
+          uiSession !== undefined && uiSession.current !== undefined ? uiSession.current.value.key : undefined;
+        if (sessionId === undefined || sessionId === null || sessionId === '') {
+          return { ok: false, reason: 'no-session' };
+        }
+        const conversation = ctx.get('conversation');
+        let shell = null;
+        try {
+          shell = conversation !== undefined && conversation.input !== undefined ? conversation.input.shell(sessionId) : null;
+        } catch (error) {
+          console.warn('DeepSeek chat: handoff could not resolve the composer', error);
+        }
+        if (shell === null || shell.actions === undefined) return { ok: false, reason: 'no-composer' };
+        const actions = shell.actions;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const current = typeof shell.projection?.detectText === 'string' ? shell.projection.detectText : '';
+            const prefix = current === '' ? '' : current.endsWith('\n\n') ? '' : current.endsWith('\n') ? '\n' : '\n\n';
+            const span = { start: current.length, end: current.length, draftRev: shell.rev };
+            if (actions.insertText(prefix + text, span)) return { ok: true, mode: 'insert' };
+          } catch (error) {
+            console.warn('DeepSeek chat: handoff insert failed', error);
+          }
+        }
+        try {
+          const current = typeof shell.projection?.detectText === 'string' ? shell.projection.detectText : '';
+          actions.setDraft(current === '' ? text : current + '\n\n' + text);
+          return { ok: true, mode: 'setDraft' };
+        } catch (error) {
+          console.warn('DeepSeek chat: handoff setDraft failed', error);
+        }
+        return { ok: false, reason: 'failed' };
+      };
     }
 
     function ChatPanelSeat() {
@@ -384,15 +884,20 @@ window.__ModuleLoader__.load({
       return h('div', { ref: seatRef, className: 'dsh-dsc-seat', 'aria-hidden': true });
     }
 
-    function ChatPanel({ back, t, usePanelInfo }) {
+    function ChatPanel({ back, deliver, t, usePanelInfo }) {
       const active = usePanelInfo((info) => info.activePanelId === PANEL_ID);
       const rect = usePanelRect();
       const [opened, setOpened] = React.useState(false);
       const [phase, setPhase] = React.useState('loading');
       const [error, setError] = React.useState('');
       const [attempt, setAttempt] = React.useState(0);
+      const [menuOpen, setMenuOpen] = React.useState(false);
+      const [busy, setBusy] = React.useState(false);
+      const [toast, setToast] = React.useState(null);
+      const [pending, setPending] = React.useState(null);
       const hostRef = React.useRef(null);
       const viewRef = React.useRef(null);
+      const handoffRef = React.useRef(null);
       const tRef = React.useRef(t);
       const visible = active && opened;
 
@@ -409,11 +914,39 @@ window.__ModuleLoader__.load({
         const onKeyDown = (event) => {
           if (event.key !== 'Escape' || event.defaultPrevented) return;
           event.preventDefault();
+          if (menuOpen) {
+            setMenuOpen(false);
+            return;
+          }
+          if (pending !== null) {
+            setPending(null);
+            return;
+          }
+          if (toast !== null) {
+            setToast(null);
+            return;
+          }
           back();
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-      }, [visible, back]);
+      }, [visible, back, menuOpen, pending, toast]);
+
+      React.useEffect(() => {
+        if (!menuOpen) return undefined;
+        const onPointerDown = (event) => {
+          const root = handoffRef.current;
+          if (root !== null && !root.contains(event.target)) setMenuOpen(false);
+        };
+        document.addEventListener('pointerdown', onPointerDown, true);
+        return () => document.removeEventListener('pointerdown', onPointerDown, true);
+      }, [menuOpen]);
+
+      React.useEffect(() => {
+        if (toast === null) return undefined;
+        const timer = window.setTimeout(() => setToast(null), toast.action === undefined ? 6000 : 12000);
+        return () => window.clearTimeout(timer);
+      }, [toast]);
 
       React.useEffect(() => {
         if (!opened) return undefined;
@@ -563,6 +1096,109 @@ window.__ModuleLoader__.load({
         };
       }, [opened, attempt]);
 
+      const showToast = React.useCallback((text, action) => {
+        setToast({ text, action });
+      }, []);
+
+      const handoffErrorText = React.useCallback(
+        (reason) => {
+          switch (reason) {
+            case 'no-messages':
+              return t('handoff.error.noMessages');
+            case 'no-selection':
+              return t('handoff.error.noSelection');
+            case 'timeout':
+              return t('handoff.error.timeout');
+            case 'not-ready':
+              return t('handoff.error.notReady');
+            case 'unsupported':
+              return t('handoff.error.unsupported');
+            case 'no-session':
+              return t('handoff.error.noSession');
+            case 'no-composer':
+              return t('handoff.error.noComposer');
+            default:
+              return t('handoff.error.failed');
+          }
+        },
+        [t],
+      );
+
+      const commitHandoff = React.useCallback(
+        async (text, truncated, count) => {
+          setPending(null);
+          let delivered = { ok: false, reason: 'failed' };
+          if (typeof deliver === 'function') {
+            try {
+              delivered = deliver(text);
+            } catch (cause) {
+              console.warn('DeepSeek chat: handoff delivery failed', cause);
+            }
+          }
+          if (delivered !== null && delivered.ok === true) {
+            showToast(truncated ? t('handoff.doneWithTruncation') : t('handoff.done', { count }), {
+              label: t('back'),
+              onClick: back,
+            });
+            return;
+          }
+          const copied = await copyText(text);
+          const reason = handoffErrorText(delivered === null ? 'failed' : delivered.reason);
+          showToast(copied ? reason + ' · ' + t('handoff.copied') : reason, undefined);
+        },
+        [deliver, back, t, showToast, handoffErrorText],
+      );
+
+      const runHandoff = React.useCallback(
+        async (mode) => {
+          if (busy) return;
+          setMenuOpen(false);
+          const view = viewRef.current;
+          if (phase !== 'ready' || view === null) {
+            showToast(handoffErrorText('not-ready'), undefined);
+            return;
+          }
+          if (typeof view.executeJavaScript !== 'function') {
+            showToast(handoffErrorText('unsupported'), undefined);
+            return;
+          }
+          setBusy(true);
+          let timer = 0;
+          try {
+            const source = '(' + extractInGuest.toString() + ')(' + JSON.stringify(mode) + ')';
+            const result = await Promise.race([
+              view.executeJavaScript(source, true),
+              new Promise((resolve, reject) => {
+                timer = window.setTimeout(() => reject(new Error('handoff-timeout')), 30000);
+              }),
+            ]);
+            if (result === undefined || result === null) throw new Error('handoff-empty');
+            if (result.ok !== true) {
+              showToast(handoffErrorText(result.reason || 'failed'), undefined);
+              return;
+            }
+            const selected = selectHandoffMessages(result.messages || [], mode);
+            if (selected.length === 0) {
+              showToast(handoffErrorText('no-messages'), undefined);
+              return;
+            }
+            const text = formatHandoff(selected, mode, result.truncated === true, t);
+            if (text.length > HANDOFF_LIMIT) {
+              setPending({ text, chars: text.length, count: selected.length, truncated: result.truncated === true });
+              return;
+            }
+            await commitHandoff(text, result.truncated === true, selected.length);
+          } catch (cause) {
+            const reason = cause instanceof Error && cause.message === 'handoff-timeout' ? 'timeout' : 'failed';
+            showToast(handoffErrorText(reason), undefined);
+          } finally {
+            window.clearTimeout(timer);
+            setBusy(false);
+          }
+        },
+        [busy, phase, t, showToast, handoffErrorText, commitHandoff],
+      );
+
       const reload = React.useCallback(() => {
         if (phase === 'unsupported') return;
         if (phase === 'error' || viewRef.current === null) {
@@ -678,6 +1314,67 @@ window.__ModuleLoader__.load({
             h('span', { className: 'dsh-dsc-brand' }, h(ChatGlyph, { size: 18 })),
             h('span', { className: 'dsh-dsc-title' }, t('web.title')),
             h('span', { className: 'dsh-dsc-spacer' }),
+            h(
+              'div',
+              { className: 'dsh-dsc-handoff', ref: handoffRef },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-dsc-handoff-main',
+                  title: busy ? t('handoff.busy') : t('handoff.title'),
+                  'aria-label': t('handoff.title'),
+                  onClick: () => {
+                    void runHandoff('all');
+                  },
+                  disabled: busy || phase !== 'ready',
+                },
+                busy
+                  ? h('span', { className: 'dsh-dsc-handoff-spinner', 'aria-hidden': true })
+                  : h(HandoffGlyph, { size: 14 }),
+                h('span', null, t('handoff')),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-dsc-handoff-caret',
+                  title: t('handoff.menu.all'),
+                  'aria-label': t('handoff.menu.all'),
+                  'aria-expanded': menuOpen,
+                  onClick: () => setMenuOpen((value) => !value),
+                  disabled: busy || phase !== 'ready',
+                },
+                h(ChevronDownGlyph, { size: 12 }),
+              ),
+              menuOpen && phase === 'ready'
+                ? h(
+                    'div',
+                    { className: 'dsh-dsc-menu', role: 'menu' },
+                    HANDOFF_MODES.map((mode) =>
+                      h(
+                        'button',
+                        {
+                          key: mode,
+                          type: 'button',
+                          role: 'menuitemradio',
+                          'aria-checked': mode === 'all',
+                          className: 'dsh-dsc-menu-item',
+                          onClick: () => {
+                            void runHandoff(mode);
+                          },
+                        },
+                        h(
+                          'span',
+                          { className: 'dsh-dsc-menu-check' },
+                          mode === 'all' ? h(CheckGlyph, { size: 13 }) : null,
+                        ),
+                        h('span', null, t('handoff.menu.' + mode)),
+                      ),
+                    ),
+                  )
+                : null,
+            ),
             h(IconButton, { label: t('reload'), onClick: reload }, h(ReloadGlyph, { size: 15 })),
             h(IconButton, { label: t('openExternal'), onClick: openExternal }, h(ExternalGlyph, { size: 15 })),
           ),
@@ -687,6 +1384,51 @@ window.__ModuleLoader__.load({
             h('div', { ref: hostRef, className: 'dsh-dsc-host' }),
             overlay,
           ),
+          toast !== null
+            ? h(
+                'div',
+                { className: 'dsh-dsc-toast', role: 'status', 'aria-live': 'polite' },
+                h('span', { className: 'dsh-dsc-toast-text' }, toast.text),
+                toast.action === undefined
+                  ? null
+                  : h('button', { type: 'button', onClick: toast.action.onClick }, toast.action.label),
+              )
+            : null,
+          pending !== null
+            ? h(
+                'div',
+                { className: 'dsh-dsc-modal', role: 'dialog', 'aria-modal': 'true' },
+                h(
+                  'div',
+                  { className: 'dsh-dsc-modal-card' },
+                  h('h2', { className: 'dsh-dsc-heading' }, t('handoff.confirm.title')),
+                  h('p', { className: 'dsh-dsc-text' }, t('handoff.confirm.body', { count: pending.chars })),
+                  h(
+                    'div',
+                    { className: 'dsh-dsc-actions' },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-dsc-button',
+                        onClick: () => {
+                          const value = pending;
+                          if (value === null) return;
+                          setPending(null);
+                          void commitHandoff(value.text, value.truncated, value.count);
+                        },
+                      },
+                      t('handoff.confirm.ok'),
+                    ),
+                    h(
+                      'button',
+                      { type: 'button', className: 'dsh-dsc-button', onClick: () => setPending(null) },
+                      t('handoff.cancel'),
+                    ),
+                  ),
+                ),
+              )
+            : null,
         ),
       );
     }
@@ -706,6 +1448,7 @@ window.__ModuleLoader__.load({
       }, 'deepseek-web-chat: styles');
 
       const back = () => ctx.layout.selectPanel(null);
+      const deliver = createHandoffDelivery(ctx);
 
       ctx.slots.inject('main', () =>
         ctx.slots.register(
@@ -736,7 +1479,7 @@ window.__ModuleLoader__.load({
             id: 'deepseek-web-chat.panel',
             order: -5,
             locale: NS,
-            inject: () => ({ back }),
+            inject: () => ({ back, deliver }),
           },
           ChatPanel,
         ),
