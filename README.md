@@ -4,7 +4,9 @@
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
-![装好插件后的效果：左侧栏出现 DeepSeek 聊天图标，点击后在主内容区打开 DeepSeek 网页聊天面板](./screenshot.png)
+![原生右侧栏并排：左侧 Harness 对话与右侧 DeepSeek 聊天同屏，主对话自动让出宽度、不再被遮挡](./native-sidebar.png)
+
+上图：V1.4.0 原生右侧栏并排模式——DeepSeek 作为右侧栏 Tab 打开，Harness 主对话自动缩窄，两个窗口互不遮挡。
 
 ## 使用
 
@@ -88,7 +90,8 @@
 - `tests/pure.test.mjs`：纯函数单测（接力范围、格式化、摘要、模板、hash、设置、历史、诊断、guest 探针、token 估算）
 - `locale/*.json`：插件管理器中显示的名称与说明
 - `icon.svg`：插件图标，使用 DeepSeek 官方网页 favicon 中的鲸鱼标记（<https://fe-static.deepseek.com/chat/favicon.svg>），仅用于标识 DeepSeek 网页聊天入口
-- `screenshot.png`：插件安装后的整体效果图（README 顶部）
+- `native-sidebar.png`：原生右侧栏并排效果图（README 顶部）
+- `screenshot.png`：V1.2 全屏面板效果图（留档）
 - `handoff-button.png`：「接力」按钮位置示意图
 
 ## 开发与测试
