@@ -1,5 +1,7 @@
 # DeepSeek 网页聊天（Harness 插件）
 
+[![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
+
 > 作者：Dream　·　当前版本：V1.5.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
@@ -97,6 +99,7 @@
 - `locale/*.json`：插件管理器中显示的名称与说明
 - `icon.svg`：插件图标，使用 DeepSeek 官方网页 favicon 中的鲸鱼标记（<https://fe-static.deepseek.com/chat/favicon.svg>），仅用于标识 DeepSeek 网页聊天入口
 - `待开发需求.md`：V1.6 / V2 待开发需求与优先级
+- `.github/workflows/test.yml`：GitHub Actions 单测 CI
 - `native-sidebar.png`：原生右侧栏并排效果图（README 顶部）
 - `screenshot.png`：V1.2 全屏面板效果图（留档）
 - `handoff-button.png`：「接力」按钮位置示意图
@@ -107,9 +110,7 @@
 npm test
 ```
 
-单测通过 Node 内置测试运行器加载 `client.js` 的 `__test` 导出，不需要启动 Harness。
-
-GitHub Actions 单测工作流已准备好；当前仓库的 OAuth token 缺少 `workflow` scope，需要 `gh auth refresh -s workflow` 后再推送 `.github/workflows/test.yml`。
+单测通过 Node 内置测试运行器加载 `client.js` 的 `__test` 导出，不需要启动 Harness。GitHub Actions 会在 push / PR 时自动运行 `npm test`。
 
 ## 兼容性说明
 
