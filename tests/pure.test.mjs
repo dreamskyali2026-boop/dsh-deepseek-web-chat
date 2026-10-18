@@ -72,6 +72,7 @@ const {
   captureSegment,
   mergeCapturedMessages,
   mergePreviewMessages,
+  dockPaneById,
   ChatPanel,
   ChatPanelTab,
   createHandoffDelivery,
@@ -291,6 +292,25 @@ test('mergeCapturedMessages dedupes by key and only appends new messages', () =>
     ['a', 'b', 'c', 'd'],
   );
   assert.equal(merged[1].text, '二（更新）');
+});
+
+test('dockPaneById docks the native tab pane safely', () => {
+  const calls = [];
+  assert.equal(dockPaneById({ dock: (id) => calls.push(id) }, 'pane-1'), true);
+  assert.deepEqual(calls, ['pane-1']);
+  assert.equal(
+    dockPaneById(
+      {
+        dock() {
+          throw new Error('pane already closed');
+        },
+      },
+      'pane-2',
+    ),
+    false,
+  );
+  assert.equal(dockPaneById(null, 'pane-3'), false);
+  assert.equal(dockPaneById({ dock() {} }, ''), false);
 });
 
 test('mergePreviewMessages keeps selection and reindexes ids', () => {
@@ -704,7 +724,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.2');
+  assert.equal(parsed.version, '1.6.3');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);

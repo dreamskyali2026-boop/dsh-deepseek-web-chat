@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.2';
+    const PLUGIN_VERSION = '1.6.3';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const COMPOSER_NOTICE_MS = 10000;
@@ -374,6 +374,7 @@ window.__ModuleLoader__.load({
       'auth.out': '未登录',
       'auth.unknown': '登录状态未知',
       'auth.signIn': '去登录',
+      'auth.persistHint': 'DSH 的浏览器分区不持久：重启应用后需要重新登录；可在系统浏览器打开以保持登录。',
       'preview.title': '接力到 Harness',
       'preview.target': '插入到',
       'preview.untitled': '未命名会话',
@@ -420,6 +421,7 @@ window.__ModuleLoader__.load({
       'onboarding.start': '开始使用',
       'dock.on': '并排显示',
       'dock.off': '全屏显示',
+      'dock.fallback': '无法打开原生右栏，已切换到全屏面板（不会遮挡对话）。',
       'dock.title': '在右侧栏并排打开：Harness 对话会让出宽度，不再被遮挡',
       'dock.resize': '调整并排宽度',
       'dock.resizeHint': '拖动调整宽度；双击恢复默认；聚焦后按左右方向键微调。',
@@ -625,6 +627,8 @@ window.__ModuleLoader__.load({
       'auth.out': 'Signed out',
       'auth.unknown': 'Sign-in state unknown',
       'auth.signIn': 'Sign in',
+      'auth.persistHint':
+        'DSH browser partitions are not persistent: signing in again is required after a restart; use the system browser to keep the session.',
       'preview.title': 'Hand off to Harness',
       'preview.target': 'Insert into',
       'preview.untitled': 'Untitled conversation',
@@ -671,6 +675,7 @@ window.__ModuleLoader__.load({
       'onboarding.start': 'Get started',
       'dock.on': 'Side by side',
       'dock.off': 'Full screen',
+      'dock.fallback': 'Could not open the native right sidebar; switched to the full panel.',
       'dock.title': 'Open in the right sidebar: the Harness conversation makes room instead of being covered',
       'dock.resize': 'Resize the side-by-side panel',
       'dock.resizeHint': 'Drag to resize, double-click to reset, or focus and use the arrow keys.',
@@ -2554,6 +2559,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       });
     }
 
+    function dockPaneById(sidebar, paneId) {
+      if (sidebar === null || sidebar === undefined || typeof sidebar.dock !== 'function') return false;
+      if (typeof paneId !== 'string' || paneId === '') return false;
+      try {
+        sidebar.dock(paneId);
+        return true;
+      } catch (error) {
+        return false;
+      }
+    }
+
     function selectHandoffMessages(messages, mode) {
       if (mode === 'last') {
         for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -3592,17 +3608,38 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           return;
         }
         if (typeof openDock === 'function') {
-          let openedTab = false;
+          let result = false;
           try {
-            openedTab = openDock() === true;
+            result = openDock();
           } catch (error) {
-            openedTab = false;
+            result = false;
           }
-          if (openedTab) {
+          if (result === true) {
             setDocked(false);
             back();
             return;
           }
+          if (result !== null && result !== undefined && typeof result.then === 'function') {
+            setDocked(false);
+            void result
+              .then((openedTab) => {
+                if (openedTab === true) {
+                  back();
+                  return;
+                }
+                open();
+                showToast(t('dock.fallback'));
+              })
+              .catch(() => {
+                open();
+                showToast(t('dock.fallback'));
+              });
+            return;
+          }
+          setDocked(false);
+          open();
+          showToast(t('dock.fallback'));
+          return;
         }
         if (docked) {
           setDocked(false);
@@ -3612,7 +3649,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         setDockRect(dockGeometry(settingsRef.current.dockRatio));
         setDocked(true);
         back();
-      }, [embedded, quick, openDock, closeTab, docked, open, back]);
+      }, [embedded, quick, openDock, closeTab, docked, open, back, showToast, t]);
 
       const resizeDockTo = React.useCallback((width) => {
         const next = clampDockWidth(width);
@@ -5501,6 +5538,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             )
           : null;
 
+      const authBanner =
+        phase === 'ready' && authState === 'out'
+          ? h(
+              'div',
+              { className: 'dsh-dsc-banner', role: 'status' },
+              h('span', { className: 'dsh-dsc-banner-copy' }, t('auth.persistHint')),
+              h(
+                'div',
+                { className: 'dsh-dsc-banner-actions' },
+                h('button', { type: 'button', onClick: openExternal }, t('openExternal')),
+                h('button', { type: 'button', onClick: performReload }, t('auth.signIn')),
+              ),
+            )
+          : null;
+
       const onboardingNode =
         onboarding && opened && !quick
           ? h(
@@ -5700,6 +5752,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             : null,
           healthBanner,
           draftBanner,
+          authBanner,
           h(
             'div',
             { className: 'dsh-dsc-body' },
@@ -5738,7 +5791,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
     }
 
     function ChatPanelTab(props) {
-      const tab = props.useTabInfo();
+      const info = props.useTabInfo();
+      const tab = info !== null && info !== undefined && info.tab !== undefined ? info.tab : info;
+      const panel = info !== null && info !== undefined && info.panel !== undefined ? info.panel : null;
+      const panelId =
+        panel !== null && panel !== undefined && typeof panel.id === 'string' ? panel.id : '';
+      React.useEffect(() => {
+        if (panelId !== '' && typeof props.dockPane === 'function') props.dockPane(panelId);
+      }, [panelId, props.dockPane]);
       const closeTab =
         tab !== null && tab !== undefined && tab.actions !== undefined && typeof tab.actions.close === 'function'
           ? () => tab.actions.close()
@@ -5770,8 +5830,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const openPanel = () => ctx.layout.selectPanel(PANEL_ID);
       const delivery = createHandoffDelivery(ctx);
       const listTargets = () => sessionTargets(ctx, t);
-      const openSidebarTab = () => {
-        const sidebar = ctx.get('sidebarRight');
+      const openSidebarTab = async () => {
+        const sidebar = ctx.get('sidebarRight') ?? ctx.sidebarRight;
         if (sidebar === undefined || sidebar === null || typeof sidebar.openTab !== 'function') return false;
         const tryOpen = () => {
           try {
@@ -5781,12 +5841,35 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             return false;
           }
         };
-        if (tryOpen()) return true;
+        const ensureExpanded = () => {
+          try {
+            if (
+              typeof sidebar.isExpanded === 'function' &&
+              sidebar.isExpanded() === false &&
+              typeof sidebar.toggleExpanded === 'function'
+            ) {
+              sidebar.toggleExpanded();
+            }
+          } catch (error) {
+            /* The sidebar may be disposed while the panel is switching. */
+          }
+        };
+        const openNow = () => {
+          if (!tryOpen()) return false;
+          ensureExpanded();
+          return true;
+        };
+        if (openNow()) return true;
         if (activePanelId() === PANEL_ID) back();
-        if (tryOpen()) return true;
+        await new Promise((resolve) => window.setTimeout(resolve, 80));
+        if (openNow()) return true;
+        ensureExpanded();
+        await new Promise((resolve) => window.setTimeout(resolve, 120));
+        if (openNow()) return true;
         console.warn('DeepSeek chat: the native right sidebar tab is unavailable');
         return false;
       };
+      const dockPane = (paneId) => dockPaneById(ctx.get('sidebarRight') ?? ctx.sidebarRight, paneId);
       const activePanelId = () => {
         try {
           return ctx.layout.panelInfo.getSnapshot().activePanelId;
@@ -5933,7 +6016,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             name: 'sidebar.right.pane.tab',
             key: TAB_ID,
             locale: NS,
-            inject: () => ({ back, open: openPanel, delivery, listTargets }),
+            inject: () => ({ back, open: openPanel, delivery, listTargets, dockPane }),
           },
           ChatPanelTab,
         ),
@@ -6015,6 +6098,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         captureSegment,
         mergeCapturedMessages,
         mergePreviewMessages,
+        dockPaneById,
         ChatPanel,
         ChatPanelTab,
         createHandoffDelivery,

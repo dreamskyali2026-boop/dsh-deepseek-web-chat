@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V1.6.2　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V1.6.3　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -32,7 +32,7 @@
 
 点击顶栏的「并排显示」按钮，会打开 DSH 的原生右侧栏 Tab：右侧栏参与布局，Harness 主对话自动让出宽度，不再被遮挡；拖动右侧栏自带的分隔条即可调整宽度。Tab 内的全屏按钮会回到主面板并关闭该 Tab。
 
-如果当前客户端没有 `sidebarRight` / `sidebarRightTabs` 能力，插件会自动退回旧的浮层停靠；浮层模式下拖动面板左缘的分隔条可调宽度，双击恢复默认，宽度会记住。
+如果这个 Tab 之前被拖成了浮窗，插件会在打开后自动把它收回停靠栏。若当前客户端没有 `sidebarRight` / `sidebarRightTabs` 能力，或原生右栏多次重试仍打不开，插件会打开全屏面板并提示「无法打开原生右栏」，不再退回会遮挡对话文字的浮层停靠。
 
 ## 接力到 Harness
 
@@ -91,7 +91,7 @@
 
 - 在应用运行期间，登录状态会保留；离开聊天面板、切换面板、刷新 Harness 页面都不会丢失。
 - 面板顶部会显示「已登录 / 未登录」徽标；未登录时点击徽标可直接重新加载登录页。
-- 完全退出并重新启动应用后，需要重新登录 DeepSeek 网页版。
+- 完全退出并重新启动应用后，需要重新登录 DeepSeek 网页版；未登录时面板顶部会说明该限制，并提供「在浏览器中打开」和「去登录」。
 - 如果希望使用浏览器自身的持久登录，请点击面板顶部的「在浏览器中打开」。它会在系统默认浏览器中打开同一个地址。
 
 ## 为什么不修改客户端文件
