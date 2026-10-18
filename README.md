@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V1.6.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V1.6.1　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -48,6 +48,9 @@
 - 留在面板时插入成功可「撤销」；自动返回时可用 `Ctrl/⌘+Z` 撤销。目标会话不可用或插入失败时自动复制到剪贴板。
 - 插入内容带来源和时间，角色用「我 / DeepSeek」，保留代码块、链接、图片地址和表格。
 - 抓取通过读取 DeepSeek 页面 DOM 完成；读取时会显示已抓取条数/耗时，网页改版导致失败时会提示手动复制。
+- 长对话按约 12 秒一段抓取；没抓完时预览顶部显示「继续抓取」，可以先插入已抓部分，也可以继续抓完。
+- 抓取结束会标记是否到达过对话开头和底部；没抓完或缺少开头时会在预览里明确提示。
+- 「最后一条回复」「当前一轮问答」在超长对话下会自动连抓最多 3 段；仍不够时会提示改用「整段对话」。
 
 界面位置：DeepSeek 面板顶栏右上角、并排按钮左侧。
 

@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.0';
+    const PLUGIN_VERSION = '1.6.1';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
@@ -347,6 +347,7 @@ window.__ModuleLoader__.load({
       'handoff.error.noMessages': '没有读到对话内容',
       'handoff.error.noSelection': '没有选中文字',
       'handoff.error.timeout': '读取超时，请重试',
+      'handoff.tooLong': '对话过长，自动抓取未完成；请改用「整段对话」继续。',
       'handoff.error.unsupported': '当前环境无法读取网页内容',
       'handoff.error.noSession': '请先在 Harness 打开一个对话',
       'handoff.error.noComposer': '找不到 Harness 输入框',
@@ -393,6 +394,12 @@ window.__ModuleLoader__.load({
       'preview.empty': '没有选中任何消息',
       'preview.noTarget': '请先在 Harness 打开一个对话',
       'preview.truncated': '对话较长，可能未完整抓取',
+      'preview.partial': '已抓取 {count} 条，可能还有更多内容。',
+      'preview.continue': '继续抓取',
+      'preview.continuing': '正在继续抓取…',
+      'preview.captureDone': '已完成抓取',
+      'preview.noNew': '没有抓到新内容，可能已到末尾或页面未加载完',
+      'preview.missingStart': '可能缺少对话开头',
       'preview.long': '内容较长，可能占用较多上下文',
       'preview.targetHint': '内容会插入该会话的输入框，不会自动发送。',
       'preview.return': '插入后返回 Harness',
@@ -591,6 +598,7 @@ window.__ModuleLoader__.load({
       'handoff.error.noMessages': 'No conversation was found',
       'handoff.error.noSelection': 'No text is selected',
       'handoff.error.timeout': 'Reading timed out. Try again.',
+      'handoff.tooLong': 'The conversation is too long to finish automatically; use "Whole conversation" to continue.',
       'handoff.error.unsupported': 'This environment cannot read the page',
       'handoff.error.noSession': 'Open a Harness conversation first',
       'handoff.error.noComposer': 'The Harness composer is unavailable',
@@ -637,6 +645,12 @@ window.__ModuleLoader__.load({
       'preview.empty': 'No messages selected',
       'preview.noTarget': 'Open a Harness conversation first',
       'preview.truncated': 'The conversation was long and may be incomplete',
+      'preview.partial': 'Captured {count} messages; more may remain.',
+      'preview.continue': 'Continue capture',
+      'preview.continuing': 'Capturing…',
+      'preview.captureDone': 'Capture complete',
+      'preview.noNew': 'No new messages captured; the end may already be reached',
+      'preview.missingStart': 'The start of the conversation may be missing',
       'preview.long': 'Long content may use a lot of context',
       'preview.targetHint': 'The content is inserted as a draft. Nothing is sent automatically.',
       'preview.return': 'Return to Harness after inserting',
@@ -1291,6 +1305,20 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   gap: 6px;
   flex-wrap: wrap;
 }
+.dsh-dsc-preview-capture {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 0.5px dashed var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: color-mix(in srgb, #d9a441 10%, var(--dsw-alias-bg-base));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.dsh-dsc-preview-capture-copy { flex: 1 1 auto; min-width: 0; }
 .dsh-dsc-chip {
   height: 26px;
   padding: 0 9px;
@@ -2150,9 +2178,25 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       );
     }
 
-    async function extractInGuest(mode) {
+    async function extractInGuest(mode, checkpoint) {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const nextFrame = () =>
+        new Promise((resolve) => {
+          let settled = false;
+          let timer = 0;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+          };
+          timer = setTimeout(finish, 160);
+          try {
+            requestAnimationFrame(() => requestAnimationFrame(finish));
+          } catch (error) {
+            finish();
+          }
+        });
       const SELECTORS = {
         version: 1,
         messages: ['[data-virtual-list-item-key]'],
@@ -2263,7 +2307,15 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         const selection = window.getSelection ? window.getSelection() : null;
         const selected = clean(selection ? selection.toString() : '');
         if (selected === '') return { ok: false, reason: 'no-selection' };
-        return { ok: true, messages: [{ role: 'selection', text: selected }], truncated: false, total: 1 };
+        return {
+          ok: true,
+          messages: [{ role: 'selection', text: selected }],
+          truncated: false,
+          total: 1,
+          done: true,
+          atStart: true,
+          checkpoint: null,
+        };
       }
       const first = document.querySelector(ITEM);
       if (first === null) return { ok: false, reason: 'no-messages' };
@@ -2278,7 +2330,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }
       const messages = [];
       const indexByKey = new Map();
-      let truncated = false;
+      const SEGMENT_BUDGET_MS = 12000;
+      const MAX_STEPS = 120;
       let reported = -1;
       const report = () => {
         if (messages.length === reported) return;
@@ -2294,31 +2347,50 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           const key = el.getAttribute('data-virtual-list-item-key') || '';
           const item = readItem(el);
           if (item === null) continue;
+          const record = key === '' ? item : { key, role: item.role, text: item.text };
           if (key !== '' && indexByKey.has(key)) {
-            messages[indexByKey.get(key)] = item;
+            messages[indexByKey.get(key)] = record;
             continue;
           }
           if (key !== '') indexByKey.set(key, messages.length);
-          messages.push(item);
+          messages.push(record);
         }
         report();
       };
       const original = scroller.scrollTop;
+      const resume =
+        checkpoint !== null &&
+        checkpoint !== undefined &&
+        typeof checkpoint === 'object' &&
+        Number.isFinite(Number(checkpoint.scrollTop));
+      let atStart = resume ? checkpoint.atStart !== false : true;
+      let finished = false;
+      let endTop = original;
+      const startedAt = Date.now();
       try {
-        let lastHeight = -1;
-        for (let settle = 0; settle < 6; settle += 1) {
-          scroller.scrollTop = 0;
+        if (resume) {
+          const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+          scroller.scrollTop = Math.min(max, Math.max(0, Number(checkpoint.scrollTop)));
           await nextFrame();
-          await sleep(120);
+          await sleep(140);
           capture();
-          const height = scroller.scrollHeight;
-          if (height === lastHeight) break;
-          lastHeight = height;
+        } else {
+          let lastHeight = -1;
+          for (let settle = 0; settle < 6; settle += 1) {
+            scroller.scrollTop = 0;
+            await nextFrame();
+            await sleep(120);
+            capture();
+            const height = scroller.scrollHeight;
+            if (height === lastHeight) break;
+            lastHeight = height;
+          }
         }
         let lastTop = -1;
-        for (let step = 0; step < 140; step += 1) {
+        for (let step = 0; step < MAX_STEPS; step += 1) {
           const max = scroller.scrollHeight - scroller.clientHeight;
           if (scroller.scrollTop >= max - 2) break;
+          if (Date.now() - startedAt >= SEGMENT_BUDGET_MS) break;
           const delta = Math.max(220, Math.floor(scroller.clientHeight * 0.8));
           scroller.scrollTop = Math.min(max, scroller.scrollTop + delta);
           await nextFrame();
@@ -2326,10 +2398,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           capture();
           if (scroller.scrollTop === lastTop) break;
           lastTop = scroller.scrollTop;
-          if (step === 139) truncated = true;
         }
-        await sleep(40);
+        await sleep(80);
         capture();
+        const maxAfter = scroller.scrollHeight - scroller.clientHeight;
+        if (scroller.scrollTop >= maxAfter - 2) {
+          await sleep(120);
+          capture();
+          const settledMax = scroller.scrollHeight - scroller.clientHeight;
+          scroller.scrollTop = Math.max(0, settledMax);
+          await nextFrame();
+          await sleep(40);
+          capture();
+        }
+        const finalMax = scroller.scrollHeight - scroller.clientHeight;
+        finished = scroller.scrollTop >= finalMax - 2;
+        endTop = scroller.scrollTop;
       } finally {
         try {
           scroller.scrollTop = original;
@@ -2337,8 +2421,136 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           /* Best effort: the page may have re-rendered while collecting. */
         }
       }
-      if (messages.length === 0) return { ok: false, reason: 'no-messages' };
-      return { ok: true, messages, truncated, total: messages.length };
+      const nextCheckpoint = { scrollTop: endTop, atStart };
+      if (messages.length === 0) {
+        if (resume) {
+          return {
+            ok: true,
+            messages,
+            truncated: !finished || !atStart,
+            total: 0,
+            done: finished,
+            atStart,
+            checkpoint: nextCheckpoint,
+          };
+        }
+        return { ok: false, reason: 'no-messages' };
+      }
+      return {
+        ok: true,
+        messages,
+        truncated: !finished || !atStart,
+        total: messages.length,
+        done: finished,
+        atStart,
+        checkpoint: nextCheckpoint,
+      };
+    }
+
+    async function captureSegment(view, mode, checkpoint, timeoutMs) {
+      if (view === null || view === undefined || typeof view.executeJavaScript !== 'function') {
+        throw new Error('handoff-unsupported');
+      }
+      const checkpointArg =
+        checkpoint !== null && checkpoint !== undefined && typeof checkpoint === 'object'
+          ? JSON.stringify(checkpoint)
+          : 'null';
+      const source =
+        '(' + extractInGuest.toString() + ')(' + JSON.stringify(mode) + ', ' + checkpointArg + ')';
+      let timer = 0;
+      try {
+        const result = await Promise.race([
+          view.executeJavaScript(source, true),
+          new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('handoff-timeout')), timeoutMs);
+          }),
+        ]);
+        if (result === undefined || result === null) throw new Error('handoff-empty');
+        return result;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function capturedMessageIdentity(message) {
+      const role = message !== null && message !== undefined ? String(message.role || 'user') : 'user';
+      const text =
+        message !== null && message !== undefined && typeof message.text === 'string' ? message.text : '';
+      return role + '\u0000' + text;
+    }
+
+    function mergeCapturedMessages(existing, incoming) {
+      const rows = [];
+      const indexByKey = new Map();
+      const textSeen = new Set();
+      for (const message of Array.isArray(existing) ? existing : []) {
+        if (message === null || message === undefined || typeof message !== 'object') continue;
+        const key = typeof message.key === 'string' ? message.key : '';
+        const role =
+          message.role === 'assistant' ? 'assistant' : message.role === 'selection' ? 'selection' : 'user';
+        const text = typeof message.text === 'string' ? message.text : '';
+        if (text === '') continue;
+        if (key !== '') indexByKey.set(key, rows.length);
+        textSeen.add(capturedMessageIdentity({ role, text }));
+        rows.push({ key, role, text });
+      }
+      for (const message of Array.isArray(incoming) ? incoming : []) {
+        if (message === null || message === undefined || typeof message !== 'object') continue;
+        const key = typeof message.key === 'string' ? message.key : '';
+        const role =
+          message.role === 'assistant' ? 'assistant' : message.role === 'selection' ? 'selection' : 'user';
+        const text = typeof message.text === 'string' ? message.text : '';
+        if (text === '') continue;
+        if (key !== '' && indexByKey.has(key)) {
+          const index = indexByKey.get(key);
+          rows[index] = { key, role, text };
+          textSeen.add(capturedMessageIdentity({ role, text }));
+          continue;
+        }
+        const identity = capturedMessageIdentity({ role, text });
+        if (key === '' && textSeen.has(identity)) continue;
+        if (key !== '') indexByKey.set(key, rows.length);
+        textSeen.add(identity);
+        rows.push({ key, role, text });
+      }
+      return rows;
+    }
+
+    function mergePreviewMessages(existing, incoming) {
+      const rows = Array.isArray(existing) ? existing : [];
+      const anySelected =
+        rows.length === 0 ||
+        rows.some((message) => message !== null && message !== undefined && message.selected !== false);
+      const selectedByKey = new Map();
+      const selectedByText = new Map();
+      for (const message of rows) {
+        if (message === null || message === undefined || typeof message !== 'object') continue;
+        const selected = message.selected !== false;
+        if (typeof message.key === 'string' && message.key !== '') selectedByKey.set(message.key, selected);
+        selectedByText.set(capturedMessageIdentity(message), selected);
+      }
+      return mergeCapturedMessages(
+        rows.map((message) => ({
+          key: typeof message.key === 'string' ? message.key : '',
+          role: message.role,
+          text: message.text,
+        })),
+        incoming,
+      ).map((message, index) => {
+        const identity = capturedMessageIdentity(message);
+        return {
+          id: index,
+          key: message.key,
+          role: message.role,
+          text: message.text,
+          selected:
+            message.key !== '' && selectedByKey.has(message.key)
+              ? selectedByKey.get(message.key)
+              : selectedByText.has(identity)
+                ? selectedByText.get(identity)
+                : anySelected,
+        };
+      });
     }
 
     function selectHandoffMessages(messages, mode) {
@@ -3053,6 +3265,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const crashRecoveredRef = React.useRef(false);
       const autoHandoffRef = React.useRef(false);
       const runHandoffRef = React.useRef(null);
+      const progressBaseRef = React.useRef(0);
       const toggleRef = React.useRef(null);
       const requestHandoffRef = React.useRef(null);
       const openRef = React.useRef(null);
@@ -3577,19 +3790,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             return;
           }
           const startedAt = Date.now();
+          const SEGMENT_TIMEOUT = 20000;
           setBusy(true);
           setProgress(0);
           setElapsed(0);
-          let timer = 0;
           try {
-            const source = '(' + extractInGuest.toString() + ')(' + JSON.stringify(mode) + ')';
-            const result = await Promise.race([
-              view.executeJavaScript(source, true),
-              new Promise((resolve, reject) => {
-                timer = window.setTimeout(() => reject(new Error('handoff-timeout')), 45000);
-              }),
-            ]);
-            if (result === undefined || result === null) throw new Error('handoff-empty');
+            progressBaseRef.current = 0;
+            let result = await captureSegment(view, mode, null, SEGMENT_TIMEOUT);
             if (result.ok !== true) {
               void probePage(view).then((page) => {
                 if (page === null) return;
@@ -3599,7 +3806,26 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               showToast(handoffErrorText(result.reason || 'failed'));
               return;
             }
-            const selected = selectHandoffMessages(result.messages || [], mode);
+            let captured = Array.isArray(result.messages) ? result.messages : [];
+            let checkpoint = result.checkpoint === undefined ? null : result.checkpoint;
+            let done = result.done !== false;
+            let atStart = result.atStart !== false;
+            let segments = 1;
+            while (mode !== 'all' && mode !== 'selection' && !done && segments < 3) {
+              progressBaseRef.current = captured.length;
+              result = await captureSegment(view, mode, checkpoint, SEGMENT_TIMEOUT);
+              if (result.ok !== true) throw new Error(result.reason || 'handoff-failed');
+              captured = mergeCapturedMessages(captured, result.messages);
+              checkpoint = result.checkpoint === undefined ? checkpoint : result.checkpoint;
+              done = result.done === true;
+              atStart = atStart && result.atStart !== false;
+              segments += 1;
+            }
+            if (mode !== 'all' && mode !== 'selection' && !done) {
+              showToast(t('handoff.tooLong'));
+              return;
+            }
+            const selected = selectHandoffMessages(captured, mode);
             if (selected.length === 0) {
               showToast(handoffErrorText('no-messages'));
               return;
@@ -3614,13 +3840,20 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             setHistory(loadHistory());
             setPreview({
               mode,
-              truncated: result.truncated === true,
+              truncated: !done || !atStart,
               messages: selected.map((message, index) => ({
                 id: index,
+                key: typeof message.key === 'string' ? message.key : '',
                 role: message.role,
                 text: message.text,
                 selected: true,
               })),
+              capture: {
+                done,
+                atStart,
+                checkpoint,
+                total: captured.length,
+              },
               targets,
               targetSessionId: targetSessionId === undefined || targetSessionId === null ? '' : targetSessionId,
               format: defaults.defaultFormat,
@@ -3641,14 +3874,67 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             });
             showToast(handoffErrorText(reason));
           } finally {
-            window.clearTimeout(timer);
             setBusy(false);
             setProgress(0);
             setElapsed(0);
+            progressBaseRef.current = 0;
           }
         },
-        [busy, onboarding, dismissOnboarding, phase, showToast, handoffErrorText, delivery, listTargets],
+        [busy, onboarding, dismissOnboarding, phase, showToast, handoffErrorText, delivery, listTargets, t],
       );
+
+      const continueCapture = React.useCallback(async () => {
+        if (busy || preview === null || preview.capture === null || preview.capture === undefined) return;
+        if (preview.capture.done === true) return;
+        const checkpoint = preview.capture.checkpoint;
+        if (checkpoint === null || checkpoint === undefined) return;
+        const view = viewRef.current;
+        if (phase !== 'ready' || view === null || typeof view.executeJavaScript !== 'function') {
+          showToast(handoffErrorText('not-ready'));
+          return;
+        }
+        setBusy(true);
+        setProgress(preview.messages.length);
+        setElapsed(0);
+        progressBaseRef.current = preview.messages.length;
+        try {
+          const result = await captureSegment(view, preview.mode, checkpoint, 20000);
+          if (result.ok !== true) {
+            showToast(handoffErrorText(result.reason || 'failed'));
+            return;
+          }
+          const done = result.done === true;
+          const atStart = preview.capture.atStart !== false && result.atStart !== false;
+          const incoming = Array.isArray(result.messages) ? result.messages : [];
+          setPreview((current) => {
+            if (current === null || current.capture === null || current.capture === undefined) return current;
+            const merged = mergePreviewMessages(current.messages, incoming);
+            return {
+              ...current,
+              messages: merged,
+              truncated: !done || !atStart,
+              capture: {
+                done,
+                atStart,
+                checkpoint:
+                  result.checkpoint === undefined ? current.capture.checkpoint : result.checkpoint,
+                total: merged.length,
+              },
+            };
+          });
+          if (done) showToast(t('preview.captureDone'));
+          else if (incoming.length === 0) showToast(t('preview.noNew'));
+          track('dsc_capture_continue', {});
+        } catch (cause) {
+          const reason = cause instanceof Error && cause.message === 'handoff-timeout' ? 'timeout' : 'failed';
+          showToast(handoffErrorText(reason));
+        } finally {
+          setBusy(false);
+          setProgress(0);
+          setElapsed(0);
+          progressBaseRef.current = 0;
+        }
+      }, [busy, preview, phase, showToast, handoffErrorText, t]);
 
       const requestHandoff = React.useCallback(() => {
         if (visible && phaseRef.current === 'ready' && viewRef.current !== null) {
@@ -3942,7 +4228,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         const onConsoleMessage = (event) => {
           const message = event !== null && event !== undefined && typeof event.message === 'string' ? event.message : '';
           const match = message.match(/__DSH_DSC_PROGRESS__(\d+)/);
-          if (match !== null) setProgress(Number(match[1]));
+          if (match !== null) setProgress(progressBaseRef.current + Number(match[1]));
           if (message.startsWith('__DSH_DSC_DONE__')) {
             try {
               const payload = JSON.parse(message.slice('__DSH_DSC_DONE__'.length));
@@ -4625,6 +4911,30 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     preview.showText ? t('preview.hideText') : t('preview.viewText'),
                   ),
                 ),
+                preview.capture !== undefined && preview.capture !== null && preview.capture.done !== true
+                  ? h(
+                      'div',
+                      { className: 'dsh-dsc-preview-capture', role: 'status' },
+                      h(
+                        'span',
+                        { className: 'dsh-dsc-preview-capture-copy' },
+                        t('preview.partial', { count: preview.messages.length }),
+                        preview.capture.atStart === false
+                          ? h('span', { className: 'dsh-dsc-preview-warn' }, ' · ' + t('preview.missingStart'))
+                          : null,
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-dsc-button',
+                          disabled: busy,
+                          onClick: () => void continueCapture(),
+                        },
+                        busy ? t('preview.continuing') : t('preview.continue'),
+                      ),
+                    )
+                  : null,
                 h(
                   'div',
                   { className: 'dsh-dsc-preview-list' },
@@ -4710,8 +5020,20 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     t('preview.chars', { count: previewChars }),
                     ' · ',
                     t('preview.tokens', { count: previewTokens }),
-                    preview.truncated
-                      ? h('span', { className: 'dsh-dsc-preview-warn' }, ' · ' + t('preview.truncated'))
+                    preview.truncated &&
+                    !(preview.capture !== undefined && preview.capture !== null && preview.capture.done === false)
+                      ? h(
+                          'span',
+                          { className: 'dsh-dsc-preview-warn' },
+                          ' · ' +
+                            t(
+                              preview.capture !== undefined &&
+                                preview.capture !== null &&
+                                preview.capture.atStart === false
+                                ? 'preview.missingStart'
+                                : 'preview.truncated',
+                            ),
+                        )
                       : null,
                     previewChars > settings.longThreshold
                       ? h('span', { className: 'dsh-dsc-preview-warn' }, ' · ' + t('preview.long'))
@@ -4742,7 +5064,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                       {
                         type: 'button',
                         className: 'dsh-dsc-button dsh-dsc-primary',
-                        disabled: previewSelected.length === 0 || preview.targetSessionId === '',
+                        disabled: previewSelected.length === 0 || preview.targetSessionId === '' || busy,
                         onClick: commitPreview,
                       },
                       preview.autoSend === true && settings.autoSend
@@ -5637,6 +5959,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         sessionTargets,
         currentSessionId,
         extractInGuest,
+        captureSegment,
+        mergeCapturedMessages,
+        mergePreviewMessages,
         ChatPanel,
         ChatPanelTab,
         createHandoffDelivery,

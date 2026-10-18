@@ -69,6 +69,9 @@ const {
   sessionTargets,
   currentSessionId,
   extractInGuest,
+  captureSegment,
+  mergeCapturedMessages,
+  mergePreviewMessages,
   ChatPanel,
   ChatPanelTab,
   createHandoffDelivery,
@@ -257,8 +260,155 @@ test('extractInGuest preserves links, images and Markdown tables', async () => {
     assert.match(text, /!\[截图\]\(https:\/\/example\.com\/a\.png\)/);
     assert.match(text, /\| 列 A \| 列 B \|/);
     assert.match(text, /\| --- \| --- \|/);
+    assert.equal(result.messages[0].key, 'k1');
+    assert.equal(result.done, true);
+    assert.equal(result.atStart, true);
+    assert.equal(result.truncated, false);
+    assert.equal(result.checkpoint.scrollTop, 100);
   } finally {
     console.log = originalLog;
+    globalThis.document = previous.document;
+    globalThis.requestAnimationFrame = previous.requestAnimationFrame;
+    globalThis.getComputedStyle = previous.getComputedStyle;
+  }
+});
+
+test('mergeCapturedMessages dedupes by key and only appends new messages', () => {
+  const merged = mergeCapturedMessages(
+    [
+      { key: 'a', role: 'user', text: '一' },
+      { key: 'b', role: 'assistant', text: '二' },
+    ],
+    [
+      { key: 'b', role: 'assistant', text: '二（更新）' },
+      { key: 'c', role: 'user', text: '三' },
+      { role: 'user', text: '三' },
+      { key: 'd', role: 'assistant', text: '四' },
+    ],
+  );
+  assert.deepEqual(
+    merged.map((message) => message.key),
+    ['a', 'b', 'c', 'd'],
+  );
+  assert.equal(merged[1].text, '二（更新）');
+});
+
+test('mergePreviewMessages keeps selection and reindexes ids', () => {
+  const next = mergePreviewMessages(
+    [
+      { id: 0, key: 'a', role: 'user', text: '一', selected: false },
+      { id: 1, key: 'b', role: 'assistant', text: '二', selected: true },
+    ],
+    [
+      { key: 'b', role: 'assistant', text: '二' },
+      { key: 'c', role: 'user', text: '三' },
+    ],
+  );
+  assert.deepEqual(
+    next.map((message) => message.id),
+    [0, 1, 2],
+  );
+  assert.deepEqual(
+    next.map((message) => message.selected),
+    [false, true, true],
+  );
+
+  const noneSelected = mergePreviewMessages(
+    [{ id: 0, key: 'a', role: 'user', text: '一', selected: false }],
+    [{ key: 'b', role: 'assistant', text: '二' }],
+  );
+  assert.equal(noneSelected[1].selected, false);
+});
+
+test('captureSegment passes the checkpoint and returns the guest result', async () => {
+  let source = '';
+  const result = await captureSegment(
+    {
+      executeJavaScript(input) {
+        source = input;
+        return Promise.resolve({
+          ok: true,
+          messages: [{ key: 'k', role: 'user', text: 'hi' }],
+          done: false,
+          atStart: true,
+          checkpoint: { scrollTop: 120, atStart: true },
+        });
+      },
+    },
+    'all',
+    { scrollTop: 100, atStart: true },
+    1000,
+  );
+  assert.match(source, /extractInGuest/);
+  assert.match(source, /"all"/);
+  assert.match(source, /"scrollTop":100/);
+  assert.equal(result.done, false);
+  assert.equal(result.checkpoint.scrollTop, 120);
+
+  await assert.rejects(
+    captureSegment(
+      {
+        executeJavaScript() {
+          return new Promise(() => {});
+        },
+      },
+      'all',
+      null,
+      10,
+    ),
+    /handoff-timeout/,
+  );
+});
+
+test('extractInGuest returns a resumable checkpoint when the budget runs out', async () => {
+  const content = mkEl('DIV', { class: 'ds-assistant-message-main-content' }, [mkEl('P', {}, [mkText('长对话')])]);
+  const item = mkEl('DIV', { 'data-virtual-list-item-key': 'k1' }, [content]);
+  const scroller = { parentElement: null, scrollHeight: 100000, clientHeight: 400, scrollTop: 0 };
+  const body = { parentElement: null };
+  scroller.parentElement = body;
+  item.parentElement = scroller;
+
+  const previous = {
+    document: globalThis.document,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    getComputedStyle: globalThis.getComputedStyle,
+    now: Date.now,
+    log: console.log,
+  };
+  globalThis.document = {
+    baseURI: 'https://chat.deepseek.com/',
+    body,
+    scrollingElement: body,
+    documentElement: body,
+    querySelector(selector) {
+      return selector === '[data-virtual-list-item-key]' ? item : null;
+    },
+    querySelectorAll(selector) {
+      return selector === '[data-virtual-list-item-key]' ? [item] : [];
+    },
+  };
+  globalThis.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+  globalThis.getComputedStyle = () => ({ overflowY: 'auto' });
+  console.log = () => {};
+  let now = 0;
+  Date.now = () => {
+    now += 3000;
+    return now;
+  };
+  try {
+    const first = await extractInGuest('all');
+    assert.equal(first.ok, true);
+    assert.equal(first.done, false);
+    assert.equal(first.truncated, true);
+    assert.equal(first.atStart, true);
+    assert.ok(first.checkpoint.scrollTop > 0);
+    const resumed = await extractInGuest('all', { scrollTop: first.checkpoint.scrollTop, atStart: true });
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.done, false);
+    assert.ok(resumed.checkpoint.scrollTop > first.checkpoint.scrollTop);
+  } finally {
+    Date.now = previous.now;
+    console.log = previous.log;
     globalThis.document = previous.document;
     globalThis.requestAnimationFrame = previous.requestAnimationFrame;
     globalThis.getComputedStyle = previous.getComputedStyle;
@@ -518,7 +668,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.0');
+  assert.equal(parsed.version, '1.6.1');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
