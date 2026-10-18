@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V1.6.9　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V1.6.10　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -20,7 +20,7 @@
 
 ### Quick Ask 紧凑小窗
 
-按 `Ctrl/⌘+Shift+Space`（或输入 `/deepseek-ask`）打开一个悬浮在 Harness 对话上的紧凑 DeepSeek 窗口，不切换主面板，适合临时追问；按 `Esc` 关闭，点顶栏展开按钮可回到完整面板。小窗复用同一个 DeepSeek 登录会话。
+按 `Ctrl/⌘+Shift+Space`（或输入 `/deepseek-ask`）打开一个悬浮在 Harness 对话上的紧凑 DeepSeek 窗口，不切换主面板，适合临时追问；按 `Esc` 关闭，点顶栏展开按钮可回到完整面板。小窗复用同一个 DeepSeek 登录会话。按住标题栏空白处可拖动小窗到任意位置（拖动后位置会记住，下次打开仍在原处），标题栏聚焦时也可用方向键微调；窗口不会被拖出屏幕外。
 
 ### 草稿保护
 

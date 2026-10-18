@@ -48,6 +48,10 @@ const {
   clampDockWidth,
   dockGeometry,
   quickGeometry,
+  clampQuickRect,
+  restoreQuickRect,
+  loadQuickRect,
+  saveQuickRect,
   embeddedBarHeight,
   menuLayout,
   normalizeSettings,
@@ -498,7 +502,7 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
       if (index === 17) states[index] = true;
       if (index === 19) states[index] = true;
       if (index === 23) states[index] = { status: 'remote', version: 2, fetchedAt: Date.now() };
-      if (index === 28) states[index] = { left: 100, top: 100, width: 220, maxHeight: 300 };
+      if (index === 29) states[index] = { left: 100, top: 100, width: 220, maxHeight: 300 };
       const setter = (value) => {
         states[index] = typeof value === 'function' ? value(states[index]) : value;
       };
@@ -772,7 +776,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.9');
+  assert.equal(parsed.version, '1.6.10');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -1425,6 +1429,61 @@ test('observer installer updates the live selector set without duplicating', () 
     globalThis.window = previous.window;
     console.log = previous.log;
   }
+});
+
+// --- V1.6.10: Quick Ask window dragging + position memory --------------------
+
+test('clampQuickRect keeps the window inside the viewport and reachable', () => {
+  const viewport = { width: 1200, height: 800 };
+  const clamped = clampQuickRect({ left: 500, top: 300, width: 420, height: 600 }, viewport);
+  assert.deepEqual(clamped, { left: 500, top: 300, width: 420, height: 600 });
+
+  const pushed = clampQuickRect({ left: 2000, top: 1200, width: 420, height: 600 }, viewport);
+  assert.equal(pushed.left, 1200 - 420 - 8);
+  assert.equal(pushed.top, 800 - 56);
+
+  const negative = clampQuickRect({ left: -80, top: -80, width: 420, height: 600 }, viewport);
+  assert.equal(negative.left, 8);
+  assert.equal(negative.top, 8);
+
+  const tinyViewport = clampQuickRect({ left: 10, top: 10, width: 900, height: 900 }, { width: 500, height: 500 });
+  assert.equal(tinyViewport.width, 500 - 16);
+  assert.equal(tinyViewport.height, 500 - 16);
+
+  const fallback = clampQuickRect(null, viewport);
+  assert.equal(fallback.width, 320);
+  assert.equal(fallback.height, 420);
+});
+
+test('restoreQuickRect applies the saved position and rejects invalid records', () => {
+  const base = { left: 100, top: 80, width: 420, height: 600 };
+  const viewport = { width: 1200, height: 800 };
+  assert.deepEqual(restoreQuickRect(base, { left: 300, top: 200 }, viewport), {
+    left: 300,
+    top: 200,
+    width: 420,
+    height: 600,
+  });
+  assert.deepEqual(restoreQuickRect(base, { left: 9999, top: 200 }, viewport).left, 1200 - 420 - 8);
+  assert.equal(restoreQuickRect(base, null, viewport), base);
+  assert.equal(restoreQuickRect(base, { left: 'x' }, viewport), base);
+  assert.equal(restoreQuickRect(base, { top: 100 }, viewport), base);
+});
+
+test('quick window position persists and tolerates corrupt data', () => {
+  saveQuickRect(null);
+  assert.equal(loadQuickRect(), null);
+  assert.equal(saveQuickRect({ left: 123.4, top: 56.7 }), true);
+  assert.deepEqual(loadQuickRect(), { left: 123, top: 57 });
+  assert.equal(saveQuickRect({ left: NaN }), false);
+  window.localStorage.setItem('dsh-deepseek-web-chat.quick-rect.v1', '{oops');
+  assert.equal(loadQuickRect(), null);
+  window.localStorage.setItem(
+    'dsh-deepseek-web-chat.quick-rect.v1',
+    JSON.stringify({ left: 'left', top: 10 }),
+  );
+  assert.equal(loadQuickRect(), null);
+  saveQuickRect(null);
 });
 
 test('sanitizeSelectorList filters unsafe entries and caps the list', () => {

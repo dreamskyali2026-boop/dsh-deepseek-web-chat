@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.9';
+    const PLUGIN_VERSION = '1.6.10';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -43,6 +43,7 @@ window.__ModuleLoader__.load({
     const SCENARIO_TEMPLATES = ['review', 'compare', 'code', 'paper', 'copy'];
     const HISTORY_LIMIT = 20;
     const DRAFT_KEY = 'dsh-deepseek-web-chat.draft.v1';
+    const QUICK_RECT_KEY = 'dsh-deepseek-web-chat.quick-rect.v1';
     const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
     const DRAFT_MAX_CHARS = 50000;
     const DEFAULT_SETTINGS = Object.freeze({
@@ -580,6 +581,7 @@ window.__ModuleLoader__.load({
       'shortcut.quick': '快速打开 DeepSeek 小窗',
       'quick.expand': '展开到完整面板',
       'quick.hint': '快速提问；按 Esc 关闭',
+      'quick.drag': '按住标题栏拖动小窗；聚焦后可用方向键微调位置',
       'menu.history': '接力历史…',
       'menu.reverse': '把 Harness 上下文带到 DeepSeek…',
       'menu.diagnostics': '页面诊断',
@@ -856,6 +858,7 @@ window.__ModuleLoader__.load({
       'shortcut.quick': 'Open the compact DeepSeek window',
       'quick.expand': 'Expand to the full panel',
       'quick.hint': 'Quick question; press Esc to close',
+      'quick.drag': 'Drag the title bar to move this window; arrow keys nudge it when focused',
       'menu.history': 'Handoff history…',
       'menu.reverse': 'Bring Harness context to DeepSeek…',
       'menu.diagnostics': 'Page diagnostics',
@@ -1047,6 +1050,24 @@ window.__ModuleLoader__.load({
 }
 .dsh-dsc-panel-quick .dsh-dsc-title {
   max-width: 170px;
+}
+.dsh-dsc-bar-draggable {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.dsh-dsc-bar-draggable:active {
+  cursor: grabbing;
+}
+.dsh-dsc-bar-draggable:focus-within {
+  outline: none;
+}
+.dsh-dsc-dragging .dsh-dsc-webview {
+  pointer-events: none;
+}
+.dsh-dsc-dragging {
+  user-select: none;
+  opacity: 0.96;
 }
 .dsh-dsc-panel {
   position: fixed;
@@ -2184,6 +2205,45 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         width,
         height,
       };
+    }
+
+    // --- Quick Ask window: dragging + position memory -----------------------
+
+    function clampQuickRect(rect, viewport) {
+      const source = rect !== null && typeof rect === 'object' ? rect : {};
+      const viewportWidth = Math.max(360, Math.round(Number(viewport && viewport.width) || 0));
+      const viewportHeight = Math.max(420, Math.round(Number(viewport && viewport.height) || 0));
+      const width = Math.round(Math.min(Math.max(Math.round(Number(source.width) || 320), 240), viewportWidth - 16));
+      const height = Math.round(Math.min(Math.max(Math.round(Number(source.height) || 420), 240), viewportHeight - 16));
+      const maxLeft = Math.max(8, viewportWidth - width - 8);
+      // Keep the 44px title bar reachable so the window can always be grabbed.
+      const maxTop = Math.max(8, viewportHeight - 56);
+      const left = Math.round(Math.min(Math.max(Math.round(Number(source.left) || 0), 8), maxLeft));
+      const top = Math.round(Math.min(Math.max(Math.round(Number(source.top) || 0), 8), maxTop));
+      return { left, top, width, height };
+    }
+
+    function restoreQuickRect(base, saved, viewport) {
+      if (saved === null || typeof saved !== 'object') return base;
+      if (!Number.isFinite(Number(saved.left)) || !Number.isFinite(Number(saved.top))) return base;
+      return clampQuickRect({ ...base, left: Number(saved.left), top: Number(saved.top) }, viewport);
+    }
+
+    function loadQuickRect() {
+      const raw = readJson(QUICK_RECT_KEY, null);
+      if (raw === null || typeof raw !== 'object') return null;
+      const left = Number(raw.left);
+      const top = Number(raw.top);
+      if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+      return { left, top };
+    }
+
+    function saveQuickRect(position) {
+      if (position === null || typeof position !== 'object') return false;
+      const left = Number(position.left);
+      const top = Number(position.top);
+      if (!Number.isFinite(left) || !Number.isFinite(top)) return false;
+      return writeJson(QUICK_RECT_KEY, { left: Math.round(left), top: Math.round(top) });
     }
 
     function shouldShowOnboarding() {
@@ -4010,6 +4070,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [dockDragging, setDockDragging] = React.useState(false);
       const [quick, setQuick] = React.useState(false);
       const [quickRect, setQuickRect] = React.useState(null);
+      const [quickDragging, setQuickDragging] = React.useState(false);
+      const quickRectRef = React.useRef(null);
+      const quickDragRef = React.useRef(null);
       const [historyQuery, setHistoryQuery] = React.useState('');
       const [menuPosition, setMenuPosition] = React.useState(null);
       const [draftOffer, setDraftOffer] = React.useState(() => loadDraft());
@@ -4186,11 +4249,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
       React.useLayoutEffect(() => {
         if (!quick) return undefined;
-        const update = () => setQuickRect(quickGeometry());
+        const update = () => {
+          setQuickRect((current) =>
+            current === null
+              ? restoreQuickPosition()
+              : clampQuickRect(current, { width: window.innerWidth, height: window.innerHeight }),
+          );
+        };
         update();
         window.addEventListener('resize', update);
         return () => window.removeEventListener('resize', update);
+        // restoreQuickPosition is a stable useCallback([]) declared below.
       }, [quick]);
+
+      React.useEffect(() => {
+        quickRectRef.current = quickRect;
+      }, [quickRect]);
 
       React.useEffect(() => {
         if (!embedded && active && !previousActiveRef.current) {
@@ -4610,6 +4684,102 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         setDockRect(dockGeometry(DEFAULT_SETTINGS.dockRatio));
         saveDockRatio(clampDockWidth(window.innerWidth * DEFAULT_SETTINGS.dockRatio));
       }, [saveDockRatio]);
+
+      const restoreQuickPosition = React.useCallback(() => {
+        const base = quickGeometry();
+        return restoreQuickRect(base, loadQuickRect(), { width: window.innerWidth, height: window.innerHeight });
+      }, []);
+
+      const startQuickDrag = React.useCallback(
+        (event) => {
+          if (!quickRef.current || event.button !== 0) return;
+          // Buttons, the auth badge and the handoff split-button stay clickable.
+          const target = event.target;
+          if (
+            target !== null &&
+            target !== undefined &&
+            typeof target.closest === 'function' &&
+            target.closest('button, .dsh-dsc-handoff, .dsh-dsc-auth') !== null
+          ) {
+            return;
+          }
+          const current =
+            quickRectRef.current === null || quickRectRef.current === undefined
+              ? quickGeometry()
+              : quickRectRef.current;
+          quickDragRef.current = {
+            startX: event.clientX,
+            startY: event.clientY,
+            startLeft: current.left,
+            startTop: current.top,
+            pointerId: event.pointerId,
+          };
+          setQuickDragging(true);
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+          } catch (error) {
+            /* Pointer capture is best effort. */
+          }
+          event.preventDefault();
+        },
+        [],
+      );
+
+      const moveQuickDrag = React.useCallback((event) => {
+        const drag = quickDragRef.current;
+        if (drag === null) return;
+        const next = clampQuickRect(
+          {
+            ...quickGeometry(),
+            left: drag.startLeft + (event.clientX - drag.startX),
+            top: drag.startTop + (event.clientY - drag.startY),
+          },
+          { width: window.innerWidth, height: window.innerHeight },
+        );
+        quickRectRef.current = next;
+        setQuickRect(next);
+        event.preventDefault();
+      }, []);
+
+      const endQuickDrag = React.useCallback((event) => {
+        const drag = quickDragRef.current;
+        if (drag === null) return;
+        quickDragRef.current = null;
+        setQuickDragging(false);
+        try {
+          event.currentTarget.releasePointerCapture(drag.pointerId);
+        } catch (error) {
+          /* Releasing pointer capture is best effort. */
+        }
+        const current = quickRectRef.current;
+        if (current !== null && current !== undefined) saveQuickRect(current);
+      }, []);
+
+      const keyQuickDrag = React.useCallback(
+        (event) => {
+          if (!quickRef.current) return;
+          const delta = event.key === 'ArrowLeft' ? -20 : event.key === 'ArrowRight' ? 20 : event.key === 'ArrowUp' ? -20 : event.key === 'ArrowDown' ? 20 : 0;
+          if (delta === 0) return;
+          const current =
+            quickRectRef.current === null || quickRectRef.current === undefined
+              ? quickGeometry()
+              : quickRectRef.current;
+          const vertical = event.key === 'ArrowUp' || event.key === 'ArrowDown';
+          const next = clampQuickRect(
+            {
+              ...current,
+              left: current.left + (vertical ? 0 : delta),
+              top: current.top + (vertical ? delta : 0),
+            },
+            { width: window.innerWidth, height: window.innerHeight },
+          );
+          event.preventDefault();
+          quickRectRef.current = next;
+          setQuickRect(next);
+          saveQuickRect(next);
+        },
+        [],
+      );
 
       const keyDockResize = React.useCallback(
         (event) => {
@@ -5389,7 +5559,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             setOpened(true);
             setDocked(false);
             setQuick(true);
-            setQuickRect(quickGeometry());
+            setQuickRect(restoreQuickPosition());
             if (activeRef.current) back();
             track('dsc_open', { source: 'quick' });
           },
@@ -6677,14 +6847,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               'dsh-dsc-panel' +
               (docked ? ' dsh-dsc-panel-docked' : '') +
               (embedded ? ' dsh-dsc-panel-embedded' : '') +
-              (quick ? ' dsh-dsc-panel-quick' : ''),
+              (quick ? ' dsh-dsc-panel-quick' : '') +
+              (quickDragging ? ' dsh-dsc-dragging' : ''),
             style: panelStyle,
             'aria-label': t('window.label'),
             'aria-hidden': visible ? undefined : true,
           },
           h(
             'header',
-            { className: 'dsh-dsc-bar' },
+            {
+              className: 'dsh-dsc-bar' + (quick ? ' dsh-dsc-bar-draggable' : ''),
+              onPointerDown: quick ? startQuickDrag : undefined,
+              onPointerMove: quick ? moveQuickDrag : undefined,
+              onPointerUp: quick ? endQuickDrag : undefined,
+              onPointerCancel: quick ? endQuickDrag : undefined,
+              onKeyDown: quick ? keyQuickDrag : undefined,
+              title: quick ? t('quick.drag') : undefined,
+            },
             embedded
               ? null
               : h(
@@ -7216,6 +7395,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         clampDockWidth,
         dockGeometry,
         quickGeometry,
+        clampQuickRect,
+        restoreQuickRect,
+        loadQuickRect,
+        saveQuickRect,
         embeddedBarHeight,
         menuLayout,
         normalizeSettings,
