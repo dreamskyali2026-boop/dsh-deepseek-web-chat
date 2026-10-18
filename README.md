@@ -1,6 +1,6 @@
 # DeepSeek 网页聊天（Harness 插件）
 
-> 作者：Dream　·　当前版本：V1.4.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V1.5.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -14,7 +14,11 @@
 2. 点击图标，会在主内容区打开 DeepSeek 网页聊天面板（不是单独的浮窗）。首次打开会显示三步引导。
 3. 点击面板左上角的返回箭头、左侧栏的其他面板或会话即可离开；聊天页面会继续保持挂载，再次点击图标即可回到原来的对话。
 4. 面板顶部提供「返回对话」「接力」「并排显示」「设置」「刷新」「在浏览器中打开」；标题会跟随 DeepSeek 当前会话。
-5. 快捷键：`Ctrl/⌘+Shift+D` 打开/关闭面板；`Ctrl/⌘+Shift+E` 直接进入接力预览；在任意 Harness 输入框输入 `/deepseek` 也能打开面板。
+5. 快捷键：`Ctrl/⌘+Shift+D` 打开/关闭面板；`Ctrl/⌘+Shift+E` 直接进入接力预览；`Ctrl/⌘+Shift+Space` 打开/关闭 Quick Ask 紧凑小窗；在任意 Harness 输入框输入 `/deepseek` 打开面板，`/deepseek-ask` 打开小窗。
+
+### Quick Ask 紧凑小窗
+
+按 `Ctrl/⌘+Shift+Space`（或输入 `/deepseek-ask`）打开一个悬浮在 Harness 对话上的紧凑 DeepSeek 窗口，不切换主面板，适合临时追问；按 `Esc` 关闭，点顶栏展开按钮可回到完整面板。小窗复用同一个 DeepSeek 登录会话。
 
 ### 并排模式
 
@@ -46,6 +50,7 @@
 - 每次成功接力会记录格式、模板、目标会话、字符数、token、来源和时间；在接力菜单的「接力历史…」里可以再次接力、复制、删除或清空。
 - 历史只存在本机浏览器存储，最多 20 条，不上传。
 - 同一段内容（按消息 + 格式 + 模板计算 hash）再次接力时，预览顶部会提示上次接力时间，仍可选择「仍然插入」。
+- 历史支持按目标会话、正文、格式、模板搜索。
 - 预览和单条历史都支持导出 / 复制 Markdown。
 
 ### 反向接力与场景模板
@@ -66,6 +71,7 @@
 - 页面自检会检查登录状态、消息节点与输入框；异常时显示「页面结构可能已改版」横幅，可复制诊断信息。
 - 诊断只包含版本、选择器命中、登录状态、URL 和本地计数，不包含对话正文、文件路径或账号信息。
 - 「本地统计」记录打开、预览、提交、成功、失败、撤销、通知、设置与模板使用次数，可复制为 JSON；不联网上报。
+- 「报告问题」会打开 GitHub Issue 草稿，预填版本、选择器命中、登录状态和本地计数，不包含对话正文、文件路径或账号信息。
 - 空闲释放默认关闭；开启后释放页面会丢失 DeepSeek 登录态，再次打开需重新登录。
 
 ## 登录与浏览器会话
@@ -90,6 +96,7 @@
 - `tests/pure.test.mjs`：纯函数单测（接力范围、格式化、摘要、模板、hash、设置、历史、诊断、guest 探针、token 估算）
 - `locale/*.json`：插件管理器中显示的名称与说明
 - `icon.svg`：插件图标，使用 DeepSeek 官方网页 favicon 中的鲸鱼标记（<https://fe-static.deepseek.com/chat/favicon.svg>），仅用于标识 DeepSeek 网页聊天入口
+- `待开发需求.md`：V1.6 / V2 待开发需求与优先级
 - `native-sidebar.png`：原生右侧栏并排效果图（README 顶部）
 - `screenshot.png`：V1.2 全屏面板效果图（留档）
 - `handoff-button.png`：「接力」按钮位置示意图
@@ -101,6 +108,8 @@ npm test
 ```
 
 单测通过 Node 内置测试运行器加载 `client.js` 的 `__test` 导出，不需要启动 Harness。
+
+GitHub Actions 单测工作流已准备好；当前仓库的 OAuth token 缺少 `workflow` scope，需要 `gh auth refresh -s workflow` 后再推送 `.github/workflows/test.yml`。
 
 ## 兼容性说明
 

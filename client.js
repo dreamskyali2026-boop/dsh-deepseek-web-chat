@@ -10,12 +10,13 @@ window.__ModuleLoader__.load({
     const WORKSPACE_KEY = 'dsh-deepseek-web-chat';
     const TAB_ID = '@local/dsh-deepseek-web-chat/tab';
     const TAB_KIND = 'dsh-deepseek-web-chat';
+    const REPO_URL = 'https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat';
     const ONBOARDING_KEY = 'dsh-deepseek-web-chat.onboarding.v1';
     const SETTINGS_KEY = 'dsh-deepseek-web-chat.settings.v1';
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.4.0';
+    const PLUGIN_VERSION = '1.5.0';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
@@ -364,7 +365,12 @@ window.__ModuleLoader__.load({
       'shortcut.handoff': '把 DeepSeek 对话接力到 Harness',
       'shortcut.noPanel': 'DeepSeek 面板尚未准备好',
       'command.open': '打开 DeepSeek 聊天',
+      'command.ask': '快速问 DeepSeek',
       'command.open.desc': '用网页版 DeepSeek 讨论，再把结论接力到 Harness',
+      'command.ask.desc': '打开一个紧凑的 DeepSeek 小窗，不离开当前对话',
+      'shortcut.quick': '快速打开 DeepSeek 小窗',
+      'quick.expand': '展开到完整面板',
+      'quick.hint': '快速提问；按 Esc 关闭',
       'menu.history': '接力历史…',
       'menu.reverse': '把 Harness 上下文带到 DeepSeek…',
       'menu.diagnostics': '页面诊断',
@@ -400,6 +406,8 @@ window.__ModuleLoader__.load({
       'handoff.directiveHeading': '## 任务指令',
       'handoff.copyOnly': '仅复制，不插入',
       'history.title': '接力历史',
+      'history.search': '搜索历史…',
+      'history.noMatch': '没有匹配的历史记录。',
       'history.empty': '还没有接力记录。',
       'history.clear': '清空历史',
       'history.clearConfirm': '清空全部接力历史？',
@@ -441,6 +449,8 @@ window.__ModuleLoader__.load({
       'settings.statsBody': '打开 {open} 次 · 接力 {preview} 次 · 成功 {ok} 次 · 失败 {failed} 次 · 撤销 {undo} 次',
       'settings.copyStats': '复制统计',
       'settings.copyDiagnostics': '复制诊断信息',
+      'settings.reportIssue': '报告问题',
+      'settings.reportHint': '会预填版本、选择器和本地计数，不包含对话正文。',
       'settings.clearHistory': '清空接力历史',
       'settings.reset': '恢复默认设置',
       'settings.resetDone': '已恢复默认设置',
@@ -452,6 +462,8 @@ window.__ModuleLoader__.load({
       'health.ok': '页面自检正常',
       'health.failed': '页面自检失败：{detail}',
       'health.diagnosticsCopied': '诊断信息已复制（不含对话内容）',
+      'toast.issueOpened': '已打开 GitHub Issue 页面，请补充复现步骤',
+      'toast.issueCopied': '已复制诊断信息，请到 GitHub Issues 反馈',
       'notify.doneTitle': 'DeepSeek 回复完成',
       'notify.doneBody': '{title}：{preview}',
       'notify.denied': '系统通知权限未开启，未读徽标仍会记录',
@@ -589,7 +601,12 @@ window.__ModuleLoader__.load({
       'shortcut.handoff': 'Hand off the DeepSeek conversation to Harness',
       'shortcut.noPanel': 'The DeepSeek panel is not ready yet',
       'command.open': 'Open DeepSeek Chat',
+      'command.ask': 'Ask DeepSeek quickly',
       'command.open.desc': 'Discuss in DeepSeek Web, then hand the conclusion off to Harness',
+      'command.ask.desc': 'Open a compact DeepSeek window without leaving the current conversation',
+      'shortcut.quick': 'Open the compact DeepSeek window',
+      'quick.expand': 'Expand to the full panel',
+      'quick.hint': 'Quick question; press Esc to close',
       'menu.history': 'Handoff history…',
       'menu.reverse': 'Bring Harness context to DeepSeek…',
       'menu.diagnostics': 'Page diagnostics',
@@ -625,6 +642,8 @@ window.__ModuleLoader__.load({
       'handoff.directiveHeading': '## Task instruction',
       'handoff.copyOnly': 'Copy only, do not insert',
       'history.title': 'Handoff history',
+      'history.search': 'Search history…',
+      'history.noMatch': 'No matching history.',
       'history.empty': 'No handoffs yet.',
       'history.clear': 'Clear history',
       'history.clearConfirm': 'Clear all handoff history?',
@@ -666,6 +685,8 @@ window.__ModuleLoader__.load({
       'settings.statsBody': '{open} opens · {preview} handoffs · {ok} succeeded · {failed} failed · {undo} undo',
       'settings.copyStats': 'Copy stats',
       'settings.copyDiagnostics': 'Copy diagnostics',
+      'settings.reportIssue': 'Report an issue',
+      'settings.reportHint': 'Prefills version, selectors and local counters; never conversation text.',
       'settings.clearHistory': 'Clear handoff history',
       'settings.reset': 'Reset to defaults',
       'settings.resetDone': 'Settings reset to defaults',
@@ -677,6 +698,8 @@ window.__ModuleLoader__.load({
       'health.ok': 'Page self-check passed',
       'health.failed': 'Page self-check failed: {detail}',
       'health.diagnosticsCopied': 'Diagnostics copied (no conversation content)',
+      'toast.issueOpened': 'Opened a GitHub issue draft; add the reproduction steps',
+      'toast.issueCopied': 'Diagnostics copied; report it in GitHub Issues',
       'notify.doneTitle': 'DeepSeek finished a reply',
       'notify.doneBody': '{title}: {preview}',
       'notify.denied': 'System notifications are blocked; the unread badge still works',
@@ -731,6 +754,23 @@ window.__ModuleLoader__.load({
 .dsh-dsc-panel-embedded .dsh-dsc-bar {
   height: 44px;
   padding-top: 0;
+}
+.dsh-dsc-panel-quick {
+  overflow: hidden;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+}
+.dsh-dsc-panel-quick .dsh-dsc-bar {
+  height: 44px;
+  padding-top: 0;
+  border-radius: 14px 14px 0 0;
+}
+.dsh-dsc-panel-quick .dsh-dsc-auth > span:last-child {
+  display: none;
+}
+.dsh-dsc-panel-quick .dsh-dsc-title {
+  max-width: 170px;
 }
 .dsh-dsc-panel {
   position: fixed;
@@ -1484,6 +1524,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   line-height: 1.55;
   resize: vertical;
 }
+.dsh-dsc-search {
+  width: 100%;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+}
 .dsh-dsc-history-list {
   display: flex;
   flex-direction: column;
@@ -1745,6 +1797,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         top: 0,
         width,
         height: window.innerHeight,
+      };
+    }
+
+    function quickGeometry() {
+      const viewportWidth = Math.max(360, window.innerWidth);
+      const viewportHeight = Math.max(420, window.innerHeight);
+      const width = Math.max(320, Math.min(480, Math.round(viewportWidth * 0.34), viewportWidth - 32));
+      const height = Math.max(360, Math.min(720, viewportHeight - 120));
+      return {
+        left: Math.max(16, viewportWidth - width - 24),
+        top: Math.max(16, Math.min(80, Math.round(viewportHeight * 0.07))),
+        width,
+        height,
       };
     }
 
@@ -2831,6 +2896,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [health, setHealth] = React.useState(null);
       const [healthDismissed, setHealthDismissed] = React.useState(false);
       const [dockDragging, setDockDragging] = React.useState(false);
+      const [quick, setQuick] = React.useState(false);
+      const [quickRect, setQuickRect] = React.useState(null);
+      const [historyQuery, setHistoryQuery] = React.useState('');
       const dockDragRef = React.useRef(null);
       const hostRef = React.useRef(null);
       const panelRootRef = React.useRef(null);
@@ -2849,8 +2917,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const handleTitleRef = React.useRef(null);
       const lastSelectionRef = React.useRef('');
       const previousActiveRef = React.useRef(active);
-      const visible = opened && (embedded ? tabVisible !== false : active || docked);
+      const visible = opened && (embedded ? tabVisible !== false : active || docked || quick);
       const visibleRef = React.useRef(visible);
+      const activeRef = React.useRef(active);
+      const quickRef = React.useRef(quick);
+      activeRef.current = active;
+      quickRef.current = quick;
       const ui = useUiSnapshot();
 
       React.useEffect(() => {
@@ -2918,10 +2990,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         return () => window.removeEventListener('resize', update);
       }, [docked, embedded]);
 
+      React.useLayoutEffect(() => {
+        if (!quick) return undefined;
+        const update = () => setQuickRect(quickGeometry());
+        update();
+        window.addEventListener('resize', update);
+        return () => window.removeEventListener('resize', update);
+      }, [quick]);
+
       React.useEffect(() => {
-        if (!embedded && active && !previousActiveRef.current && docked) setDocked(false);
+        if (!embedded && active && !previousActiveRef.current) {
+          if (docked) setDocked(false);
+          if (quick) setQuick(false);
+        }
         previousActiveRef.current = active;
-      }, [active, docked, embedded]);
+      }, [active, docked, quick, embedded]);
 
       const showToast = React.useCallback((text, actions) => {
         const list = Array.isArray(actions)
@@ -3071,6 +3154,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           open();
           return;
         }
+        if (quick) {
+          setQuick(false);
+          return;
+        }
         if (docked) {
           setDocked(false);
           return;
@@ -3080,12 +3167,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           return;
         }
         open();
-      }, [embedded, docked, active, back, open]);
+      }, [embedded, quick, docked, active, back, open]);
 
       const toggleDock = React.useCallback(() => {
         if (embedded) {
           open();
           if (typeof closeTab === 'function') closeTab();
+          return;
+        }
+        if (quick) {
+          setQuick(false);
+          setDocked(false);
+          open();
           return;
         }
         if (typeof openDock === 'function') {
@@ -3109,7 +3202,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         setDockRect(dockGeometry(settingsRef.current.dockRatio));
         setDocked(true);
         back();
-      }, [embedded, openDock, closeTab, docked, open, back]);
+      }, [embedded, quick, openDock, closeTab, docked, open, back]);
 
       const resizeDockTo = React.useCallback((width) => {
         const next = clampDockWidth(width);
@@ -3465,6 +3558,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             setToast(null);
             return;
           }
+          if (quick) {
+            setQuick(false);
+            return;
+          }
           if (docked) {
             setDocked(false);
             return;
@@ -3490,6 +3587,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         reverseOpen,
         toast,
         docked,
+        quick,
         embedded,
         closeTab,
       ]);
@@ -3752,6 +3850,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           toggle: () => toggleRef.current?.(),
           handoff: () => requestHandoffRef.current?.(),
           release: () => setOpened(false),
+          quick: () => {
+            if (quickRef.current) {
+              setQuick(false);
+              return;
+            }
+            setOpened(true);
+            setDocked(false);
+            setQuick(true);
+            setQuickRect(quickGeometry());
+            if (activeRef.current) back();
+            track('dsc_open', { source: 'quick' });
+          },
         };
         panelControl = api;
         return () => {
@@ -3967,6 +4077,26 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         showToast(copied ? t('health.diagnosticsCopied') : t('handoff.error.failed'));
       }, [health, showToast, t]);
 
+      const reportIssue = React.useCallback(async () => {
+        const page = await probePage(viewRef.current);
+        const diagnostics = buildDiagnostics(page, { stage: 'feedback' });
+        const url = new URL(REPO_URL + '/issues/new');
+        url.searchParams.set('title', '[DeepSeek Chat] ');
+        url.searchParams.set(
+          'body',
+          t('settings.reportHint') + '\n\n## 复现步骤\n\n1. \n\n## 诊断信息\n\n```json\n' + diagnostics + '\n```\n',
+        );
+        track('dsc_feedback', {});
+        try {
+          window.open(url.toString(), '_blank', 'noopener,noreferrer');
+          await copyText(diagnostics);
+          showToast(t('toast.issueOpened'));
+        } catch (error) {
+          const copied = await copyText(diagnostics);
+          showToast(copied ? t('toast.issueCopied') : t('handoff.error.failed'));
+        }
+      }, [showToast, t]);
+
       const clearHistory = React.useCallback(() => {
         saveHistory([]);
         setHistory([]);
@@ -4033,7 +4163,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         [showToast, t],
       );
 
-      const openFromHeader = embedded ? open : docked ? () => setDocked(false) : back;
+      const openFromHeader = embedded ? open : quick ? () => setQuick(false) : docked ? () => setDocked(false) : back;
 
       if (!opened) return null;
 
@@ -4095,11 +4225,15 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
       const geometry = embedded
         ? null
-        : docked
-          ? dockRect === null
-            ? dockGeometry(settingsRef.current.dockRatio)
-            : dockRect
-          : rect;
+        : quick
+          ? quickRect === null
+            ? quickGeometry()
+            : quickRect
+          : docked
+            ? dockRect === null
+              ? dockGeometry(settingsRef.current.dockRatio)
+              : dockRect
+            : rect;
       const panelStyle = embedded
         ? {
             position: 'relative',
@@ -4534,6 +4668,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 ),
               ),
               h('h3', { className: 'dsh-dsc-subheading' }, t('settings.stats')),
+              h('p', { className: 'dsh-dsc-text' }, t('settings.reportHint')),
               h(
                 'div',
                 { className: 'dsh-dsc-stats' },
@@ -4548,6 +4683,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               h(
                 'div',
                 { className: 'dsh-dsc-footer-actions' },
+                h('button', { type: 'button', className: 'dsh-dsc-button', onClick: () => void reportIssue() }, t('settings.reportIssue')),
                 h(
                   'button',
                   {
@@ -4583,6 +4719,16 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           )
         : null;
 
+      const historyMatched =
+        historyQuery.trim() === ''
+          ? history
+          : history.filter((row) => {
+              const query = historyQuery.trim().toLowerCase();
+              return [row.targetTitle, row.text, row.format, row.template, row.chars]
+                .join(' ')
+                .toLowerCase()
+                .includes(query);
+            });
       const historyNode = historyOpen
         ? h(
             'div',
@@ -4597,11 +4743,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 h(IconButton, { label: t('settings.close'), onClick: () => setHistoryOpen(false) }, h(CloseGlyph, { size: 14 })),
               ),
               history.length === 0
+                ? null
+                : h('input', {
+                    className: 'dsh-dsc-search',
+                    type: 'search',
+                    value: historyQuery,
+                    placeholder: t('history.search'),
+                    onChange: (event) => setHistoryQuery(event.target.value),
+                  }),
+              history.length === 0
                 ? h('div', { className: 'dsh-dsc-empty' }, t('history.empty'))
-                : h(
-                    'div',
-                    { className: 'dsh-dsc-history-list' },
-                    history.map((row) =>
+                : historyMatched.length === 0
+                  ? h('div', { className: 'dsh-dsc-empty' }, t('history.noMatch'))
+                  : h(
+                      'div',
+                      { className: 'dsh-dsc-history-list' },
+                      historyMatched.map((row) =>
                       h(
                         'div',
                         { key: row.id, className: 'dsh-dsc-history-row' },
@@ -4720,7 +4877,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           : null;
 
       const onboardingNode =
-        onboarding && opened
+        onboarding && opened && !quick
           ? h(
               'div',
               { className: 'dsh-dsc-onboarding', role: 'dialog', 'aria-modal': 'true' },
@@ -4761,7 +4918,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             className:
               'dsh-dsc-panel' +
               (docked ? ' dsh-dsc-panel-docked' : '') +
-              (embedded ? ' dsh-dsc-panel-embedded' : ''),
+              (embedded ? ' dsh-dsc-panel-embedded' : '') +
+              (quick ? ' dsh-dsc-panel-quick' : ''),
             style: panelStyle,
             'aria-label': t('window.label'),
             'aria-hidden': visible ? undefined : true,
@@ -4769,7 +4927,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           h(
             'header',
             { className: 'dsh-dsc-bar' },
-            embedded ? null : h(IconButton, { label: t('back'), onClick: openFromHeader }, h(BackGlyph, { size: 16 })),
+            embedded
+              ? null
+              : h(
+                  IconButton,
+                  { label: quick ? t('settings.close') : t('back'), onClick: openFromHeader },
+                  h(quick ? CloseGlyph : BackGlyph, { size: 16 }),
+                ),
             h('span', { className: 'dsh-dsc-brand' }, h(ChatGlyph, { size: 18 })),
             h('span', { className: 'dsh-dsc-title' }, ui.title !== '' ? ui.title : t('web.title')),
             authNode,
@@ -4874,12 +5038,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                   )
                 : null,
             ),
-            h(IconButton, { label: embedded || docked ? t('dock.off') : t('dock.on'), onClick: toggleDock, active: docked && !embedded }, h(SplitGlyph, { size: 15 })),
+            h(IconButton, { label: quick ? t('quick.expand') : embedded || docked ? t('dock.off') : t('dock.on'), onClick: toggleDock, active: docked && !embedded && !quick }, h(SplitGlyph, { size: 15 })),
             h(IconButton, { label: t('menu.settings'), onClick: () => setSettingsOpen(true) }, h(SettingsGlyph, { size: 15 })),
             h(IconButton, { label: t('reload'), onClick: reload }, h(ReloadGlyph, { size: 15 })),
             h(IconButton, { label: t('openExternal'), onClick: openExternal }, h(ExternalGlyph, { size: 15 })),
           ),
-          docked && !embedded
+          docked && !embedded && !quick
             ? h('div', {
                 className: 'dsh-dsc-resize' + (dockDragging ? ' dsh-dsc-resize-active' : ''),
                 role: 'separator',
@@ -5011,6 +5175,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         }
         openPanel();
       };
+      const quickPanel = () => {
+        if (panelControl !== null && typeof panelControl.quick === 'function') {
+          panelControl.quick();
+          return;
+        }
+        track('dsc_open', { source: 'quick' });
+        openPanel();
+      };
 
       const shortcutDefaults = (code) => ({
         'desktop:macos': { code, modifiers: ['primary', 'shift'] },
@@ -5036,6 +5208,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           resolve: () => ({ status: 'handled', run: togglePanel }),
         },
         'deepseek-web-chat: shortcut toggle',
+      );
+
+      registerShortcut(
+        {
+          id: 'deepseek-chat.quick',
+          label: () => t('shortcut.quick'),
+          aliases: ['quick ask', 'deepseek quick'],
+          defaults: shortcutDefaults('Space'),
+          regions: ['page', 'editable', 'terminal'],
+          modals: [],
+          resolve: () => ({ status: 'handled', run: quickPanel }),
+        },
+        'deepseek-web-chat: shortcut quick',
       );
 
       registerShortcut(
@@ -5070,6 +5255,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 },
               }),
             'deepseek-web-chat: command',
+          );
+          ctx.effect(
+            () =>
+              commandUi.register({
+                name: 'deepseek-ask',
+                available: () => true,
+                label: () => t('command.ask'),
+                description: () => t('command.ask.desc'),
+                ui: { kind: 'action', run: () => quickPanel() },
+              }),
+            'deepseek-web-chat: quick command',
           );
         }
       } catch (error) {
@@ -5157,6 +5353,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         cleanPageTitle,
         clampDockWidth,
         dockGeometry,
+        quickGeometry,
         normalizeSettings,
         loadSettings,
         saveSettings,

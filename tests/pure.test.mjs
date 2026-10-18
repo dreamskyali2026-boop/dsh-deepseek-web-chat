@@ -44,6 +44,7 @@ const {
   cleanPageTitle,
   clampDockWidth,
   dockGeometry,
+  quickGeometry,
   normalizeSettings,
   loadSettings,
   saveSettings,
@@ -503,7 +504,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.4.0');
+  assert.equal(parsed.version, '1.5.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
@@ -661,6 +662,83 @@ test('embedded ChatPanel renders without the overlay geometry', () => {
     const flat = JSON.stringify(panel);
     assert.match(flat, /dsh-dsc-root-embedded/);
     assert.match(flat, /dsh-dsc-panel-embedded/);
+    assert.equal(flat.includes('dsh-dsc-resize'), false);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test('quick geometry keeps a compact floating window on screen', () => {
+  const previous = globalThis.window;
+  globalThis.window = { ...previous, innerWidth: 1600, innerHeight: 900 };
+  try {
+    const geometry = quickGeometry();
+    assert.equal(geometry.width, 480);
+    assert.equal(geometry.height, 720);
+    assert.equal(geometry.left, 1096);
+    assert.equal(geometry.top, 63);
+    assert.ok(geometry.left + geometry.width <= 1600);
+    assert.ok(geometry.top + geometry.height <= 900);
+  } finally {
+    globalThis.window = previous;
+  }
+});
+
+test('quick mode renders the compact floating panel', () => {
+  const refs = [];
+  const states = [];
+  let stateIndex = 0;
+  let refIndex = 0;
+  Object.assign(reactStub, {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+      if (index === 0) states[index] = true;
+      if (index === 3) states[index] = 'ready';
+      if (index === 13) states[index] = 'in';
+      if (index === 14) states[index] = false;
+      if (index === 24) states[index] = true;
+      if (index === 25) states[index] = { left: 900, top: 60, width: 420, height: 600 };
+      const setter = (value) => {
+        states[index] = typeof value === 'function' ? value(states[index]) : value;
+      };
+      return [states[index], setter];
+    },
+    useRef(initial) {
+      const index = refIndex++;
+      if (!(index in refs)) refs[index] = { current: initial };
+      return refs[index];
+    },
+    useEffect() {},
+    useLayoutEffect() {},
+    useCallback(fn) {
+      return fn;
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { ...previousWindow, innerWidth: 1400, innerHeight: 900 };
+  try {
+    const panel = ChatPanel({
+      back() {},
+      open() {},
+      delivery: { currentSessionId() { return 's1'; }, deliver() { return { ok: false }; } },
+      listTargets() {
+        return [{ id: 's1', title: '当前会话', cwd: '/tmp' }];
+      },
+      t,
+      usePanelInfo(selector) {
+        return selector({ activePanelId: 'deepseek-web-chat' });
+      },
+    });
+    const flat = JSON.stringify(panel);
+    assert.match(flat, /dsh-dsc-panel-quick/);
+    assert.match(flat, /quick\.expand/);
     assert.equal(flat.includes('dsh-dsc-resize'), false);
   } finally {
     globalThis.window = previousWindow;
