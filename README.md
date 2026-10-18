@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V1.5.1　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V1.6.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -21,6 +21,12 @@
 ### Quick Ask 紧凑小窗
 
 按 `Ctrl/⌘+Shift+Space`（或输入 `/deepseek-ask`）打开一个悬浮在 Harness 对话上的紧凑 DeepSeek 窗口，不切换主面板，适合临时追问；按 `Esc` 关闭，点顶栏展开按钮可回到完整面板。小窗复用同一个 DeepSeek 登录会话。
+
+### 草稿保护
+
+- DeepSeek 输入框里未发送的内容会在停顿后快照到本机 `localStorage`（最多 50,000 字符，保留 7 天），用于应用重启、渲染进程崩溃或页面重载后的恢复。
+- 重新登录并加载完成后，如果检测到快照且输入框为空，面板顶部会出现「发现未发送草稿」提示；点「恢复到输入框」只填回文本，不会自动发送；输入框已有内容时会拒绝覆盖。
+- 发送消息或点「丢弃」后快照清除；快照只存本机，不上传，也不包含账号或登录凭据。由于快照包含草稿原文，敏感内容请用「丢弃」清理。
 
 ### 并排模式
 

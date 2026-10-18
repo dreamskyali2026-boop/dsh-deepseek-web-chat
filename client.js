@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.5.1';
+    const PLUGIN_VERSION = '1.6.0';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
@@ -24,6 +24,9 @@ window.__ModuleLoader__.load({
     const HANDOFF_TEMPLATES = ['none', 'implement', 'planFirst', 'review', 'goal', 'planCommand'];
     const SCENARIO_TEMPLATES = ['review', 'compare', 'code', 'paper', 'copy'];
     const HISTORY_LIMIT = 20;
+    const DRAFT_KEY = 'dsh-deepseek-web-chat.draft.v1';
+    const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    const DRAFT_MAX_CHARS = 50000;
     const DEFAULT_SETTINGS = Object.freeze({
       defaultMode: 'all',
       defaultFormat: 'raw',
@@ -104,6 +107,57 @@ window.__ModuleLoader__.load({
 
     function saveHistory(rows) {
       return writeJson(HISTORY_KEY, (Array.isArray(rows) ? rows : []).slice(0, HISTORY_LIMIT));
+    }
+
+    function normalizeDraft(value) {
+      if (value === null || typeof value !== 'object') return null;
+      const text = typeof value.text === 'string' ? value.text : '';
+      if (text.trim() === '') return null;
+      const at = Number(value.at);
+      if (!Number.isFinite(at) || at <= 0) return null;
+      return {
+        text: text.slice(0, DRAFT_MAX_CHARS),
+        at: Math.round(at),
+        title: typeof value.title === 'string' ? value.title.slice(0, 160) : '',
+      };
+    }
+
+    function loadDraft(now) {
+      const draft = normalizeDraft(readJson(DRAFT_KEY, null));
+      if (draft === null) return null;
+      const current = Number.isFinite(now) ? now : Date.now();
+      if (current - draft.at > DRAFT_TTL_MS || draft.at - current > 24 * 60 * 60 * 1000) return null;
+      return draft;
+    }
+
+    function saveDraft(entry) {
+      const draft = normalizeDraft(entry);
+      if (draft === null) return false;
+      return writeJson(DRAFT_KEY, draft);
+    }
+
+    function clearDraft() {
+      try {
+        if (typeof window.localStorage.removeItem === 'function') window.localStorage.removeItem(DRAFT_KEY);
+        else window.localStorage.setItem(DRAFT_KEY, '');
+      } catch (error) {
+        /* Draft storage is best effort. */
+      }
+    }
+
+    function recordDraftMessage(payload) {
+      if (payload === null || typeof payload !== 'object') return null;
+      if (payload.text === '') {
+        clearDraft();
+        return null;
+      }
+      if (typeof payload.text !== 'string') return null;
+      const draft = {
+        text: payload.text,
+        at: Number(payload.at) || Date.now(),
+        title: typeof payload.title === 'string' ? payload.title : '',
+      };
+      return saveDraft(draft) ? normalizeDraft(draft) : null;
     }
 
     function recordHandoffHistory(entry) {
@@ -462,6 +516,14 @@ window.__ModuleLoader__.load({
       'health.ok': '页面自检正常',
       'health.failed': '页面自检失败：{detail}',
       'health.diagnosticsCopied': '诊断信息已复制（不含对话内容）',
+      'draft.banner': '发现未发送草稿：{chars} 字 · {time}',
+      'draft.bannerTitled': '发现未发送草稿（{title}）：{chars} 字 · {time}',
+      'draft.restore': '恢复到输入框',
+      'draft.discard': '丢弃',
+      'draft.restored': '草稿已恢复到 DeepSeek 输入框',
+      'draft.blocked': 'DeepSeek 输入框已有内容，请先清空再恢复',
+      'draft.failed': '恢复草稿失败，请重试',
+      'draft.discarded': '草稿已丢弃',
       'toast.issueOpened': '已打开 GitHub Issue 页面，请补充复现步骤',
       'toast.issueCopied': '已复制诊断信息，请到 GitHub Issues 反馈',
       'notify.doneTitle': 'DeepSeek 回复完成',
@@ -698,6 +760,14 @@ window.__ModuleLoader__.load({
       'health.ok': 'Page self-check passed',
       'health.failed': 'Page self-check failed: {detail}',
       'health.diagnosticsCopied': 'Diagnostics copied (no conversation content)',
+      'draft.banner': 'Unsaved draft found: {chars} chars · {time}',
+      'draft.bannerTitled': 'Unsaved draft in "{title}": {chars} chars · {time}',
+      'draft.restore': 'Restore to composer',
+      'draft.discard': 'Discard',
+      'draft.restored': 'Draft restored to the DeepSeek composer',
+      'draft.blocked': 'The DeepSeek composer already has text; clear it before restoring',
+      'draft.failed': 'Could not restore the draft; try again',
+      'draft.discarded': 'Draft discarded',
       'toast.issueOpened': 'Opened a GitHub issue draft; add the reproduction steps',
       'toast.issueCopied': 'Diagnostics copied; report it in GitHub Issues',
       'notify.doneTitle': 'DeepSeek finished a reply',
@@ -2536,6 +2606,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const messageSelector = pickSelector(SELECTORS.messages);
       const assistantSelector = pickSelector(SELECTORS.assistant);
       const composer = document.querySelector(SELECTORS.composer[0]) || document.querySelector(SELECTORS.composer[1]);
+      const draftText =
+        composer === null || composer === undefined
+          ? ''
+          : String(composer.value !== undefined && composer.value !== null ? composer.value : composer.innerText || '');
       const items = document.querySelectorAll(messageSelector);
       const assistants = document.querySelectorAll(assistantSelector);
       const body = document.body;
@@ -2546,6 +2620,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return {
         ok: composer !== null,
         auth,
+        draftEmpty: draftText.trim() === '',
         title: title.slice(0, 120),
         url: typeof location !== 'undefined' && typeof location.href === 'string' ? location.href : '',
         count: items.length,
@@ -2624,6 +2699,26 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         const last = nodes[nodes.length - 1];
         return last !== undefined && last !== null ? String(last.innerText || '') : '';
       };
+      const readDraft = () => {
+        const field = document.querySelector('textarea');
+        if (field !== null) return String(field.value || '');
+        const editable = document.querySelector('[contenteditable="true"]');
+        return editable !== null ? String(editable.innerText || '') : '';
+      };
+      const sendDraft = (value) => {
+        try {
+          console.log(
+            '__DSH_DSC_DRAFT__' +
+              JSON.stringify({
+                text: String(value || '').slice(0, 50000),
+                at: Date.now(),
+                title: String(document.title || '').slice(0, 160),
+              }),
+          );
+        } catch (error) {
+          /* Draft reporting is best effort. */
+        }
+      };
       const sendTitle = () => {
         const title = String(document.title || '');
         if (title === lastTitle) return;
@@ -2634,14 +2729,37 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           /* Title reporting is best effort. */
         }
       };
+      const initialDraft = readDraft();
+      let lastDraft = initialDraft;
+      let draftChangedAt = Date.now();
+      let lastSentDraft = initialDraft.trim() === '' ? '' : initialDraft;
+      let hadDraft = initialDraft.trim() !== '';
+      if (hadDraft) sendDraft(initialDraft);
+
       const initial = read();
       lastText = initial;
       notified = initial;
       const readyAt = Date.now() + 6000;
       sendTitle();
       window.setInterval(() => {
-        const text = read();
         const now = Date.now();
+        const draft = readDraft();
+        if (draft !== lastDraft) {
+          lastDraft = draft;
+          draftChangedAt = now;
+        } else if (now - draftChangedAt >= 1200) {
+          if (draft.trim() === '' && hadDraft) {
+            hadDraft = false;
+            lastSentDraft = '';
+            sendDraft('');
+          } else if (draft.trim() !== '' && draft !== lastSentDraft) {
+            lastSentDraft = draft;
+            sendDraft(draft);
+          }
+        }
+        if (draft.trim() !== '') hadDraft = true;
+
+        const text = read();
         if (text !== lastText) {
           lastText = text;
           lastChange = now;
@@ -2664,10 +2782,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return true;
     }
 
-    function fillComposerInGuest(text) {
+    function fillComposerInGuest(text, overwrite) {
       const value = String(text || '');
+      const allow = overwrite !== false;
       const field = document.querySelector('textarea');
       if (field !== null) {
+        if (!allow && String(field.value || '').trim() !== '') return { ok: false, reason: 'not-empty' };
         try {
           const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
           if (descriptor !== undefined && typeof descriptor.set === 'function') descriptor.set.call(field, value);
@@ -2681,6 +2801,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }
       const editable = document.querySelector('[contenteditable="true"]');
       if (editable !== null) {
+        if (!allow && String(editable.innerText || '').trim() !== '') return { ok: false, reason: 'not-empty' };
         try {
           editable.focus();
           const selection = window.getSelection();
@@ -2919,6 +3040,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [quickRect, setQuickRect] = React.useState(null);
       const [historyQuery, setHistoryQuery] = React.useState('');
       const [menuPosition, setMenuPosition] = React.useState(null);
+      const [draftOffer, setDraftOffer] = React.useState(() => loadDraft());
       const dockDragRef = React.useRef(null);
       const hostRef = React.useRef(null);
       const panelRootRef = React.useRef(null);
@@ -3778,6 +3900,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           window.clearTimeout(loadTimer);
           setError('');
           setPhase('ready');
+          setDraftOffer(loadDraft());
           const target = element;
           window.setTimeout(() => {
             if (disposed || target === null) return;
@@ -3834,6 +3957,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               handleTitleRef.current?.(payload.title);
             } catch (error) {
               /* Malformed title messages are ignored. */
+            }
+          }
+          if (message.startsWith('__DSH_DSC_DRAFT__')) {
+            try {
+              recordDraftMessage(JSON.parse(message.slice('__DSH_DSC_DRAFT__'.length)));
+            } catch (error) {
+              /* Malformed draft messages are ignored. */
             }
           }
         };
@@ -4131,6 +4261,47 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         const copied = await copyText(text);
         showToast(copied ? t('health.diagnosticsCopied') : t('handoff.error.failed'));
       }, [health, showToast, t]);
+
+      const restoreDraft = React.useCallback(async () => {
+        const offer = draftOffer;
+        const view = viewRef.current;
+        if (offer === null || view === null || typeof view.executeJavaScript !== 'function') {
+          showToast(t('draft.failed'));
+          return;
+        }
+        const page = await probePage(view);
+        if (page === null || page.auth === 'out') {
+          showToast(t('draft.failed'));
+          return;
+        }
+        if (page.draftEmpty === false) {
+          showToast(t('draft.blocked'));
+          return;
+        }
+        try {
+          const source =
+            '(' + fillComposerInGuest.toString() + ')(' + JSON.stringify(offer.text) + ', false)';
+          const result = await view.executeJavaScript(source, true);
+          if (result !== null && result !== undefined && result.ok === true) {
+            setDraftOffer(null);
+            showToast(t('draft.restored'));
+            return;
+          }
+          if (result !== null && result !== undefined && result.reason === 'not-empty') {
+            showToast(t('draft.blocked'));
+            return;
+          }
+        } catch (error) {
+          /* Fall through to the failure toast. */
+        }
+        showToast(t('draft.failed'));
+      }, [draftOffer, showToast, t]);
+
+      const discardDraft = React.useCallback(() => {
+        clearDraft();
+        setDraftOffer(null);
+        showToast(t('draft.discarded'));
+      }, [showToast, t]);
 
       const reportIssue = React.useCallback(async () => {
         const page = await probePage(viewRef.current);
@@ -4931,6 +5102,30 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             )
           : null;
 
+      const draftTitle = draftOffer === null ? '' : draftOffer.title.trim();
+      const draftBanner =
+        draftOffer !== null && phase === 'ready' && authState === 'in'
+          ? h(
+              'div',
+              { className: 'dsh-dsc-banner', role: 'status' },
+              h(
+                'span',
+                { className: 'dsh-dsc-banner-copy' },
+                t(draftTitle === '' ? 'draft.banner' : 'draft.bannerTitled', {
+                  chars: draftOffer.text.length,
+                  time: formatStamp(new Date(draftOffer.at)),
+                  title: draftTitle,
+                }),
+              ),
+              h(
+                'div',
+                { className: 'dsh-dsc-banner-actions' },
+                h('button', { type: 'button', onClick: () => void restoreDraft() }, t('draft.restore')),
+                h('button', { type: 'button', onClick: discardDraft }, t('draft.discard')),
+              ),
+            )
+          : null;
+
       const onboardingNode =
         onboarding && opened && !quick
           ? h(
@@ -5129,6 +5324,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               })
             : null,
           healthBanner,
+          draftBanner,
           h(
             'div',
             { className: 'dsh-dsc-body' },
@@ -5426,11 +5622,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         saveSettings,
         loadHistory,
         saveHistory,
+        normalizeDraft,
+        loadDraft,
+        saveDraft,
+        clearDraft,
+        recordDraftMessage,
         recordHandoffHistory,
         loadMetrics,
         track,
         buildDiagnostics,
         probePageInGuest,
+        observeCompletionInGuest,
         fillComposerInGuest,
         sessionTargets,
         currentSessionId,

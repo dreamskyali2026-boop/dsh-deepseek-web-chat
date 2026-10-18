@@ -23,6 +23,9 @@ const fakeWindow = {
     setItem(key, value) {
       this.store.set(key, String(value));
     },
+    removeItem(key) {
+      this.store.delete(key);
+    },
   },
 };
 
@@ -51,11 +54,18 @@ const {
   saveSettings,
   loadHistory,
   saveHistory,
+  normalizeDraft,
+  loadDraft,
+  saveDraft,
+  clearDraft,
+  recordDraftMessage,
   recordHandoffHistory,
   loadMetrics,
   track,
   buildDiagnostics,
   probePageInGuest,
+  observeCompletionInGuest,
+  fillComposerInGuest,
   sessionTargets,
   currentSessionId,
   extractInGuest,
@@ -508,11 +518,133 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.5.1');
+  assert.equal(parsed.version, '1.6.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
   assert.equal(text.includes('No conversation content'), true);
+});
+
+test('draft snapshots are validated, persisted and expire after a week', () => {
+  const now = Date.now();
+  clearDraft();
+  assert.equal(normalizeDraft(null), null);
+  assert.equal(normalizeDraft({ text: '   ', at: now }), null);
+  assert.equal(normalizeDraft({ text: 'hello' }), null);
+  assert.equal(normalizeDraft({ text: 'hello', at: now }).title, '');
+
+  assert.equal(saveDraft({ text: '写到一半的提示词', at: now, title: '测试会话' }), true);
+  const loaded = loadDraft(now + 1000);
+  assert.equal(loaded.text, '写到一半的提示词');
+  assert.equal(loaded.title, '测试会话');
+
+  assert.equal(saveDraft({ text: 'x'.repeat(60000), at: now }), true);
+  assert.equal(loadDraft(now + 1).text.length, 50000);
+  assert.equal(loadDraft(now - 2 * 24 * 60 * 60 * 1000), null);
+
+  assert.equal(loadDraft(now + 8 * 24 * 60 * 60 * 1000), null);
+  clearDraft();
+  assert.equal(loadDraft(now), null);
+
+  assert.equal(saveDraft({ text: '   ', at: now }), false);
+  assert.equal(loadDraft(now), null);
+});
+
+test('draft bridge messages save non-empty text and clear on empty', () => {
+  clearDraft();
+  assert.equal(recordDraftMessage(null), null);
+  assert.equal(recordDraftMessage({ text: 42 }), null);
+  const saved = recordDraftMessage({ text: '一段草稿', at: 1000, title: '会话 A' });
+  assert.equal(saved.text, '一段草稿');
+  assert.equal(saved.title, '会话 A');
+  assert.equal(loadDraft(1001).text, '一段草稿');
+
+  assert.equal(recordDraftMessage({ text: '' }), null);
+  assert.equal(loadDraft(1001), null);
+});
+
+test('guest observer snapshots the composer and clears it after sending', () => {
+  const logs = [];
+  const listeners = [];
+  const field = { value: ' 写了一半 ' };
+  const assistant = { innerText: '回复' };
+  const previous = {
+    document: globalThis.document,
+    window: globalThis.window,
+    log: console.log,
+    now: Date.now,
+  };
+  globalThis.window = { ...previous.window, setInterval(callback) {
+    listeners.push(callback);
+    return listeners.length;
+  } };
+  globalThis.document = {
+    title: '测试会话',
+    querySelector(selector) {
+      return selector === 'textarea' ? field : null;
+    },
+    querySelectorAll(selector) {
+      return selector === '.ds-assistant-message-main-content' ? [assistant] : [];
+    },
+  };
+  console.log = (...args) => logs.push(args.join(' '));
+  let now = 1000;
+  Date.now = () => now;
+  try {
+    observeCompletionInGuest();
+    assert.equal(
+      logs.some((line) => line.startsWith('__DSH_DSC_DRAFT__') && line.includes('写了一半')),
+      true,
+    );
+    field.value = '';
+    const tick = listeners[0];
+    now += 1300;
+    tick();
+    now += 1300;
+    tick();
+    assert.equal(
+      logs.some((line) => line === '__DSH_DSC_DRAFT__{"text":"","at":3600,"title":"测试会话"}'),
+      true,
+    );
+  } finally {
+    globalThis.document = previous.document;
+    globalThis.window = previous.window;
+    console.log = previous.log;
+    Date.now = previous.now;
+  }
+});
+
+test('composer fill refuses to overwrite existing text when asked to keep it', () => {
+  const dispatched = [];
+  const field = {
+    value: '已经写了',
+    dispatchEvent(event) {
+      dispatched.push(event.type);
+    },
+    focus() {},
+  };
+  const previous = { document: globalThis.document, window: globalThis.window };
+  globalThis.document = {
+    querySelector(selector) {
+      return selector === 'textarea' ? field : null;
+    },
+  };
+  globalThis.window = { ...previous.window, HTMLTextAreaElement: { prototype: {} } };
+  try {
+    const blocked = fillComposerInGuest('恢复内容', false);
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.reason, 'not-empty');
+    assert.equal(field.value, '已经写了');
+    assert.equal(dispatched.length, 0);
+
+    const filled = fillComposerInGuest('恢复内容');
+    assert.equal(filled.ok, true);
+    assert.equal(field.value, '恢复内容');
+    assert.deepEqual(dispatched, ['input']);
+  } finally {
+    globalThis.document = previous.document;
+    globalThis.window = previous.window;
+  }
 });
 
 test('guest probe reports auth, composer and message selectors', () => {
@@ -522,7 +654,9 @@ test('guest probe reports auth, composer and message selectors', () => {
     title: '测试会话 - DeepSeek',
     body: { innerText: '你好' },
     querySelector(selector) {
-      return selector === 'textarea' || selector === 'textarea, [contenteditable="true"]' ? {} : null;
+      return selector === 'textarea' || selector === 'textarea, [contenteditable="true"]'
+        ? { value: '写了一半' }
+        : null;
     },
     querySelectorAll(selector) {
       if (selector === '[data-virtual-list-item-key]') return [{}, {}];
@@ -536,6 +670,7 @@ test('guest probe reports auth, composer and message selectors', () => {
     assert.equal(page.auth, 'in');
     assert.equal(page.count, 2);
     assert.equal(page.selectors.composer, true);
+    assert.equal(page.draftEmpty, false);
     assert.equal(page.title, '测试会话 - DeepSeek');
   } finally {
     globalThis.document = previous.document;
