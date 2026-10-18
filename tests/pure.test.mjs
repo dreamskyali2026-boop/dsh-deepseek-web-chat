@@ -434,8 +434,14 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
       if (index === 11) {
         states[index] = {
           mode: 'all',
-          truncated: false,
-          messages: [{ id: 0, role: 'user', text: '你好', selected: true }],
+          truncated: true,
+          messages: [{ id: 0, key: 'k1', role: 'user', text: '你好', selected: true }],
+          capture: {
+            done: false,
+            atStart: true,
+            checkpoint: { scrollTop: 120, atStart: true },
+            total: 1,
+          },
           targets: [{ id: 's1', title: '当前会话' }],
           targetSessionId: 's1',
           safety: true,
@@ -489,6 +495,9 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
     assert.match(flat, /dsh-dsc-resize/);
     assert.match(flat, /dsh-dsc-menu/);
     assert.match(flat, /dsh-dsc-preview/);
+    assert.match(flat, /preview\.partial/);
+    assert.match(flat, /preview\.continue/);
+    assert.match(flat, /dsh-dsc-preview-capture/);
     assert.match(flat, /dsh-dsc-toast/);
     assert.match(flat, /preview\.insert/);
     assert.match(flat, /dsh-dsc-modal-settings/);
