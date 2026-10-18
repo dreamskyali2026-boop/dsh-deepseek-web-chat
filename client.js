@@ -4972,13 +4972,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const openSidebarTab = () => {
         const sidebar = ctx.get('sidebarRight');
         if (sidebar === undefined || sidebar === null || typeof sidebar.openTab !== 'function') return false;
-        try {
-          sidebar.openTab(TAB_KIND);
-        } catch (error) {
-          console.warn('DeepSeek chat: could not open the native right sidebar tab', error);
-          return false;
-        }
-        return true;
+        const tryOpen = () => {
+          try {
+            sidebar.openTab(TAB_KIND);
+            return true;
+          } catch (error) {
+            return false;
+          }
+        };
+        if (tryOpen()) return true;
+        if (activePanelId() === PANEL_ID) back();
+        if (tryOpen()) return true;
+        console.warn('DeepSeek chat: the native right sidebar tab is unavailable');
+        return false;
       };
       const activePanelId = () => {
         try {
