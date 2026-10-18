@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "DeepSeek 网页聊天",
-    "description": "在 Harness 内打开一个纯聊天窗口，直接使用 chat.deepseek.com 网页对话。"
+    "description": "在 Harness 内打开 DeepSeek 网页聊天，并把对话预览后接力到当前会话。"
   }
 }

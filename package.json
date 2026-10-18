@@ -1,10 +1,32 @@
 {
   "name": "@local/dsh-deepseek-web-chat",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "author": "Dream",
-  "description": "A dedicated DeepSeek Web Chat window for the DeepSeek Harness desktop app.",
+  "description": "A dedicated DeepSeek Web Chat window for the DeepSeek Harness desktop app, with a previewable handoff into the Harness composer.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat.git"
+  },
+  "homepage": "https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat",
+  "bugs": {
+    "url": "https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek",
+    "web-chat",
+    "handoff",
+    "harness"
+  ],
+  "engines": {
+    "node": ">=24",
+    "dsh": ">=0.2.1-rc.2"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -19,6 +41,7 @@
     "icon.svg"
   ],
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

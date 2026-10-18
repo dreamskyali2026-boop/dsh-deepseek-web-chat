@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "DeepSeek Web Chat",
-    "description": "Opens a dedicated chat window for chat.deepseek.com inside Harness."
+    "description": "Open DeepSeek Web Chat inside Harness and hand the conversation off to the current task."
   }
 }
