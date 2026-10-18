@@ -386,6 +386,8 @@ window.__ModuleLoader__.load({
       'reverse.desc': '把当前会话、选中的文字或报错填进 DeepSeek 输入框；不会自动发送。',
       'reverse.session': '当前会话',
       'reverse.selection': 'Harness 选区',
+      'reverse.workspace': '工作区',
+      'reverse.noWorkspace': '（没有工作区信息）',
       'reverse.extra': '补充说明 / 报错',
       'reverse.extraPlaceholder': '例如：这段代码报错 xxx；请帮我分析原因。',
       'reverse.fill': '填入 DeepSeek 输入框',
@@ -607,6 +609,8 @@ window.__ModuleLoader__.load({
       'reverse.desc': 'Fill the DeepSeek composer with the current conversation, selected text or an error. Nothing is sent automatically.',
       'reverse.session': 'Current conversation',
       'reverse.selection': 'Harness selection',
+      'reverse.workspace': 'Workspace',
+      'reverse.noWorkspace': '(no workspace information)',
       'reverse.extra': 'Notes / error',
       'reverse.extraPlaceholder': 'For example: this code fails with …; help me find the cause.',
       'reverse.fill': 'Fill the DeepSeek composer',
@@ -1577,10 +1581,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
     function sessionTargets(ctx, t) {
       const targets = [];
       const seen = new Set();
-      const push = (id, title) => {
+      const push = (id, title, cwd) => {
         if (id === undefined || id === null || id === '' || seen.has(id)) return;
         seen.add(id);
-        targets.push({ id, title: typeof title === 'string' && title.trim() !== '' ? title.trim() : t('preview.untitled') });
+        targets.push({
+          id,
+          title: typeof title === 'string' && title.trim() !== '' ? title.trim() : t('preview.untitled'),
+          cwd: typeof cwd === 'string' ? cwd : '',
+        });
       };
       let rows = [];
       try {
@@ -1592,12 +1600,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }
       const current = currentSessionId(ctx);
       const currentRow = rows.find((row) => row !== null && row !== undefined && row.id === current);
-      if (current !== undefined && current !== '') push(current, currentRow === undefined ? undefined : currentRow.title);
+      if (current !== undefined && current !== '')
+        push(current, currentRow === undefined ? undefined : currentRow.title, currentRow === undefined ? undefined : currentRow.cwd);
       rows
         .filter((row) => row !== null && row !== undefined && row.id !== undefined && row.blank !== true)
         .sort((left, right) => timeOfRow(right) - timeOfRow(left))
         .slice(0, 30)
-        .forEach((row) => push(row.id, row.title));
+        .forEach((row) => push(row.id, row.title, row.cwd));
       return targets;
     }
 
@@ -2433,6 +2442,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const initial = read();
       lastText = initial;
       notified = initial;
+      const readyAt = Date.now() + 6000;
       sendTitle();
       window.setInterval(() => {
         const text = read();
@@ -2443,7 +2453,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           sendTitle();
           return;
         }
-        if (text.length > 0 && text !== notified && now - lastChange > 2500) {
+        if (now > readyAt && text.length > 0 && text !== notified && now - lastChange > 2500) {
           notified = text;
           sendTitle();
           try {
@@ -2818,7 +2828,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         try {
           if (typeof Notification === 'undefined') return;
           if (Notification.permission !== 'granted') {
-            if (Notification.permission === 'default') void Notification.requestPermission();
+            if (Notification.permission === 'default') {
+              void Notification.requestPermission().then((result) => {
+                if (result === 'granted') showSystemNotification(payload);
+              });
+            }
             return;
           }
           const title = tRef.current('notify.doneTitle');
@@ -3643,12 +3657,16 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         }
         const target = targets.find((row) => row.id === current) || targets[0];
         const title = target === undefined ? '' : target.title;
+        const cwd = target === undefined || typeof target.cwd !== 'string' ? '' : target.cwd;
         const selection = lastSelectionRef.current.trim();
         const parts = [
           t('reverse.desc'),
           '',
           '### ' + t('reverse.session'),
           title === '' ? t('reverse.noSession') : title,
+          '',
+          '### ' + t('reverse.workspace'),
+          cwd === '' ? t('reverse.noWorkspace') : cwd,
           '',
           '### ' + t('reverse.selection'),
           selection === '' ? t('reverse.noSelection') : selection,
