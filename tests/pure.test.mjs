@@ -72,6 +72,7 @@ const {
   captureSegment,
   mergeCapturedMessages,
   mergePreviewMessages,
+  undoInsertedDraft,
   dockPaneById,
   ChatPanel,
   ChatPanelTab,
@@ -313,6 +314,17 @@ test('dockPaneById docks the native tab pane safely', () => {
   assert.equal(dockPaneById({ dock() {} }, ''), false);
 });
 
+test('undoInsertedDraft removes only the handoff block and keeps later text', () => {
+  const before = 'existing';
+  const inserted = '\n\nhandoff';
+  assert.equal(undoInsertedDraft(before + inserted, before, inserted).text, before);
+  assert.equal(undoInsertedDraft(before + inserted + ' extra', before, inserted).text, before + ' extra');
+  assert.equal(undoInsertedDraft('prefix ' + inserted + ' suffix', '', inserted).ok, true);
+  assert.equal(undoInsertedDraft(before, before, inserted).ok, false);
+  assert.equal(undoInsertedDraft('changed', before, inserted).ok, false);
+  assert.equal(undoInsertedDraft(before + inserted, before, '').ok, false);
+});
+
 test('mergePreviewMessages keeps selection and reindexes ids', () => {
   const next = mergePreviewMessages(
     [
@@ -530,7 +542,8 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
 });
 
 test('delivery can insert, reveal the target session, focus and notify', () => {
-  const calls = { inserted: [], revealed: [], focused: [], notices: [], panels: [] };
+  const calls = { inserted: [], revealed: [], focused: [], notices: [], panels: [], drafts: [] };
+  let draft = 'existing draft';
   let noticeSeq = 0;
   const noticeStore = {
     current: null,
@@ -543,14 +556,23 @@ test('delivery can insert, reveal the target session, focus and notify', () => {
   };
   const shell = {
     rev: 3,
-    projection: { detectText: 'existing draft' },
+    projection: {
+      get detectText() {
+        return draft;
+      },
+    },
     notices: noticeStore,
     actions: {
       insertText(text, span) {
         calls.inserted.push({ text, span });
-        return span.draftRev === 3;
+        if (span.draftRev !== 3) return false;
+        draft += text;
+        return true;
       },
-      setDraft() {},
+      setDraft(value) {
+        calls.drafts.push(value);
+        draft = value;
+      },
     },
     focus() {
       calls.focused.push(true);
@@ -585,8 +607,16 @@ test('delivery can insert, reveal the target session, focus and notify', () => {
   const result = delivery.deliver('new text', 's1');
   assert.equal(result.ok, true);
   assert.equal(result.before, 'existing draft');
+  assert.equal(result.inserted, '\n\nnew text');
+  assert.equal(draft, 'existing draft\n\nnew text');
   assert.equal(calls.inserted[0].span.start, 'existing draft'.length);
   assert.equal(calls.inserted[0].text.startsWith('\n\nnew text'), true);
+  draft += ' extra';
+  const undone = delivery.undo(result);
+  assert.equal(undone.ok, true);
+  assert.equal(draft, 'existing draft extra');
+  assert.equal(delivery.undo(result).ok, false);
+  assert.equal(delivery.undo({ ...result, at: Date.now() - 20000 }).ok, false);
   assert.equal(delivery.reveal('s1'), true);
   assert.deepEqual(calls.revealed, ['s1']);
   assert.equal(delivery.focus('s1'), true);
@@ -724,7 +754,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.4');
+  assert.equal(parsed.version, '1.6.5');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);

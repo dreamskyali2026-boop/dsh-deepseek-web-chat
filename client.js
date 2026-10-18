@@ -16,10 +16,11 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.4';
+    const PLUGIN_VERSION = '1.6.5';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const COMPOSER_NOTICE_MS = 10000;
+    const UNDO_WINDOW_MS = 12000;
     const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
     const HANDOFF_FORMATS = ['raw', 'summary', 'conclusion'];
     const HANDOFF_TEMPLATES = ['none', 'implement', 'planFirst', 'review', 'goal', 'planCommand'];
@@ -41,6 +42,25 @@ window.__ModuleLoader__.load({
       dockRatio: 0.42,
     });
     let panelControl = null;
+    let undoValue = null;
+    const undoListeners = new Set();
+    const undoStore = {
+      getSnapshot: () => undoValue,
+      subscribe(listener) {
+        undoListeners.add(listener);
+        return () => undoListeners.delete(listener);
+      },
+      set(value) {
+        undoValue = value;
+        for (const listener of [...undoListeners]) {
+          try {
+            listener();
+          } catch (error) {
+            /* Undo overlay listeners are best effort. */
+          }
+        }
+      },
+    };
 
     function readJson(key, fallback) {
       try {
@@ -406,7 +426,10 @@ window.__ModuleLoader__.load({
       'preview.targetHint': '内容会插入该会话的输入框，不会自动发送。',
       'preview.return': '插入后返回 Harness',
       'preview.returnHint': '自动切到目标会话并聚焦输入框；取消勾选则留在 DeepSeek 面板。',
-      'handoff.returned': '已插入 {count} 条（{chars} 字）。可继续补充指令；Ctrl/⌘+Z 撤销。',
+      'handoff.returned': '已插入 {count} 条（{chars} 字）。可继续补充指令。',
+      'undo.hint': '已插入 {count} 条 · {chars} 字',
+      'undo.failed': '无法撤销：草稿已修改或已发送。',
+      'undo.dismiss': '关闭',
       'reload.confirm.title': '刷新 DeepSeek 页面？',
       'reload.confirm.body': '页面里未发送的输入会丢失。',
       'reload.confirm.ok': '刷新',
@@ -660,7 +683,10 @@ window.__ModuleLoader__.load({
       'preview.targetHint': 'The content is inserted as a draft. Nothing is sent automatically.',
       'preview.return': 'Return to Harness after inserting',
       'preview.returnHint': 'Switches to the target conversation and focuses the composer. Uncheck to stay in the DeepSeek panel.',
-      'handoff.returned': 'Added {count} messages ({chars} chars). Add your instruction; Ctrl/⌘+Z undoes the insertion.',
+      'handoff.returned': 'Added {count} messages ({chars} chars). Add your instruction.',
+      'undo.hint': 'Inserted {count} messages · {chars} chars',
+      'undo.failed': 'Could not undo: the draft changed or was sent.',
+      'undo.dismiss': 'Dismiss',
       'reload.confirm.title': 'Reload the DeepSeek page?',
       'reload.confirm.body': 'Unsaved text in the page will be lost.',
       'reload.confirm.ok': 'Reload',
@@ -1160,6 +1186,38 @@ window.__ModuleLoader__.load({
 }
 .dsh-dsc-toast-text { min-width: 0; }
 .dsh-dsc-toast button {
+  height: 26px;
+  flex: none;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dsh-dsc-undo-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 88px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(460px, calc(100vw - 32px));
+  padding: 8px 10px 8px 14px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px;
+  line-height: 1.45;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  pointer-events: auto;
+}
+.dsh-dsc-undo-text { min-width: 0; }
+.dsh-dsc-undo-toast button {
   height: 26px;
   flex: none;
   padding: 0 9px;
@@ -2570,6 +2628,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }
     }
 
+    function undoInsertedDraft(current, before, inserted) {
+      const draft = typeof current === 'string' ? current : '';
+      const base = typeof before === 'string' ? before : '';
+      const block = typeof inserted === 'string' ? inserted : '';
+      if (block === '') return { ok: false, reason: 'empty' };
+      if (draft === base) return { ok: false, reason: 'missing' };
+      const exact = base + block;
+      if (draft.startsWith(exact)) {
+        return { ok: true, text: base + draft.slice(exact.length) };
+      }
+      const first = draft.indexOf(block);
+      if (first !== -1 && draft.indexOf(block, first + block.length) === -1) {
+        return { ok: true, text: draft.slice(0, first) + draft.slice(first + block.length) };
+      }
+      return { ok: false, reason: 'changed' };
+    }
+
     function selectHandoffMessages(messages, mode) {
       if (mode === 'last') {
         for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -3197,7 +3272,6 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           const shell = shellFor(sessionId);
           if (shell === null || shell.actions === undefined) return { ok: false, reason: 'no-composer' };
           const actions = shell.actions;
-          const before = draftOf(shell);
           for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
               const current = draftOf(shell);
@@ -3205,8 +3279,16 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               const prefix =
                 existing === '' ? '' : existing.endsWith('\n\n') ? '' : existing.endsWith('\n') ? '\n' : '\n\n';
               const span = { start: existing.length, end: existing.length, draftRev: shell.rev };
-              if (actions.insertText(prefix + text, span)) {
-                return { ok: true, mode: 'insert', sessionId, before };
+              const inserted = prefix + text;
+              if (actions.insertText(inserted, span)) {
+                return {
+                  ok: true,
+                  mode: 'insert',
+                  sessionId,
+                  before: existing,
+                  inserted,
+                  at: Date.now(),
+                };
               }
             } catch (error) {
               console.warn('DeepSeek chat: handoff insert failed', error);
@@ -3215,12 +3297,46 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           try {
             const current = draftOf(shell);
             const existing = current === undefined ? '' : current;
-            actions.setDraft(existing === '' ? text : existing + '\n\n' + text);
-            return { ok: true, mode: 'setDraft', sessionId, before };
+            const inserted = existing === '' ? text : '\n\n' + text;
+            actions.setDraft(existing + inserted);
+            return {
+              ok: true,
+              mode: 'setDraft',
+              sessionId,
+              before: existing,
+              inserted,
+              at: Date.now(),
+            };
           } catch (error) {
             console.warn('DeepSeek chat: handoff setDraft failed', error);
           }
           return { ok: false, reason: 'failed' };
+        },
+        undo(record) {
+          if (record === null || record === undefined || typeof record !== 'object') {
+            return { ok: false, reason: 'invalid' };
+          }
+          if (
+            typeof record.sessionId !== 'string' ||
+            typeof record.before !== 'string' ||
+            typeof record.inserted !== 'string'
+          ) {
+            return { ok: false, reason: 'invalid' };
+          }
+          if (Number.isFinite(record.at) && Date.now() - record.at > UNDO_WINDOW_MS) {
+            return { ok: false, reason: 'expired' };
+          }
+          const shell = shellFor(record.sessionId);
+          if (shell === null || shell.actions === undefined) return { ok: false, reason: 'no-composer' };
+          const result = undoInsertedDraft(draftOf(shell), record.before, record.inserted);
+          if (!result.ok) return result;
+          try {
+            shell.actions.setDraft(result.text);
+            return { ok: true, text: result.text, already: result.already === true };
+          } catch (error) {
+            console.warn('DeepSeek chat: handoff undo failed', error);
+            return { ok: false, reason: 'failed' };
+          }
         },
         restore(sessionId, before) {
           if (sessionId === undefined || sessionId === null || sessionId === '') return false;
@@ -3787,6 +3903,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               return false;
             };
             if (sendNow) {
+              undoStore.set(null);
               const send = () => {
                 const sent =
                   delivery !== null && delivery !== undefined && typeof delivery.submit === 'function'
@@ -3806,6 +3923,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               }
               window.setTimeout(send, 350);
               return;
+            }
+            if (typeof delivered.inserted === 'string' && delivered.inserted !== '') {
+              undoStore.set({
+                ...delivered,
+                count: payload.count,
+                chars: payload.chars,
+              });
             }
             if (
               payload.returnToHarness === true &&
@@ -3836,19 +3960,6 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               }
             }
             const actions = [];
-            if (delivered.before !== undefined) {
-              actions.push({
-                label: t('handoff.undo'),
-                onClick: () => {
-                  const restored =
-                    delivery !== null && delivery !== undefined && typeof delivery.restore === 'function'
-                      ? delivery.restore(delivered.sessionId, delivered.before)
-                      : false;
-                  track('dsc_undo', {});
-                  showToast(restored ? t('handoff.undone') : t('handoff.error.failed'));
-                },
-              });
-            }
             actions.push({ label: t('back'), onClick: back });
             showToast(
               t('handoff.doneStats', { count: payload.count, chars: payload.chars, tokens }),
@@ -5816,6 +5927,44 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       });
     }
 
+    function UndoToast({ delivery, t }) {
+      const record = React.useSyncExternalStore(undoStore.subscribe, undoStore.getSnapshot);
+      const [error, setError] = React.useState('');
+      React.useEffect(() => {
+        if (record === null) {
+          setError('');
+          return undefined;
+        }
+        setError('');
+        const timer = window.setTimeout(() => undoStore.set(null), UNDO_WINDOW_MS);
+        return () => window.clearTimeout(timer);
+      }, [record]);
+      if (record === null) return null;
+      const undo = () => {
+        const result =
+          delivery !== null && delivery !== undefined && typeof delivery.undo === 'function'
+            ? delivery.undo(record)
+            : { ok: false, reason: 'unsupported' };
+        if (result.ok === true) {
+          track('dsc_undo', {});
+          undoStore.set(null);
+          return;
+        }
+        setError(t('undo.failed'));
+      };
+      return h(
+        'div',
+        { className: 'dsh-dsc-undo-toast', role: 'status' },
+        h(
+          'span',
+          { className: 'dsh-dsc-undo-text' },
+          error === '' ? t('undo.hint', { count: record.count, chars: record.chars }) : error,
+        ),
+        error === '' ? h('button', { type: 'button', onClick: undo }, t('handoff.undo')) : null,
+        h('button', { type: 'button', onClick: () => undoStore.set(null) }, t('undo.dismiss')),
+      );
+    }
+
     function apply(ctx) {
       const t = ctx.locale.bind(NS);
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'deepseek-web-chat: dictionaries');
@@ -6067,6 +6216,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           ChatPanel,
         ),
       );
+      ctx.slots.inject('shell.overlay', () =>
+        ctx.slots.register(
+          {
+            name: 'shell.overlay',
+            id: 'deepseek-web-chat.undo',
+            order: -4,
+            locale: NS,
+            inject: () => ({ delivery }),
+          },
+          UndoToast,
+        ),
+      );
     }
 
     return {
@@ -6109,6 +6270,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         captureSegment,
         mergeCapturedMessages,
         mergePreviewMessages,
+        undoInsertedDraft,
         dockPaneById,
         ChatPanel,
         ChatPanelTab,
