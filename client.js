@@ -5796,8 +5796,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const panel = info !== null && info !== undefined && info.panel !== undefined ? info.panel : null;
       const panelId =
         panel !== null && panel !== undefined && typeof panel.id === 'string' ? panel.id : '';
+      const dockedOnceRef = React.useRef(false);
       React.useEffect(() => {
-        if (panelId !== '' && typeof props.dockPane === 'function') props.dockPane(panelId);
+        if (dockedOnceRef.current) return;
+        if (panelId === '' || typeof props.dockPane !== 'function') return;
+        dockedOnceRef.current = true;
+        props.dockPane(panelId);
       }, [panelId, props.dockPane]);
       const closeTab =
         tab !== null && tab !== undefined && tab.actions !== undefined && typeof tab.actions.close === 'function'
