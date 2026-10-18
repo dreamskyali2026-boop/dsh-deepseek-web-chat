@@ -4,6 +4,8 @@
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>。
 
+![装好插件后的效果：左侧栏出现 DeepSeek 聊天图标，点击后在主内容区打开 DeepSeek 网页聊天面板](./screenshot.png)
+
 ## 使用
 
 1. 安装后，左侧栏会出现一个 DeepSeek 鲸鱼图标，位于「插件」和「定时任务」之间。
@@ -45,6 +47,8 @@
 - `client.js`：侧栏图标、主内容区聊天面板、嵌入式浏览器租约与加载状态
 - `locale/*.json`：插件管理器中显示的名称与说明
 - `icon.svg`：插件图标，使用 DeepSeek 官方网页 favicon 中的鲸鱼标记（<https://fe-static.deepseek.com/chat/favicon.svg>），仅用于标识 DeepSeek 网页聊天入口
+- `screenshot.png`：插件安装后的整体效果图（README 顶部）
+- `handoff-button.png`：「接力」按钮位置示意图
 
 ## 兼容性说明
 
