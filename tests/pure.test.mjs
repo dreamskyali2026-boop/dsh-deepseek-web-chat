@@ -41,6 +41,7 @@ const {
   formatHandoff,
   buildStructuredSummary,
   handoffHash,
+  cleanPageTitle,
   normalizeSettings,
   loadSettings,
   saveSettings,
@@ -498,7 +499,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.3.0');
+  assert.equal(parsed.version, '1.3.1');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
@@ -570,4 +571,16 @@ test('delivery submit checks the inserted text and calls the composer action', (
   assert.equal(submitted.length, 1);
   assert.match(submitted[0], /new text/);
   assert.equal(delivery.submit('s1', 'different text'), false);
+});
+
+test('cleanPageTitle drops DeepSeek default titles but keeps real conversation titles', () => {
+  assert.equal(cleanPageTitle('DeepSeek - Into the Unknown'), '');
+  assert.equal(cleanPageTitle('DeepSeek'), '');
+  assert.equal(cleanPageTitle('DeepSeek Web Chat'), '');
+  assert.equal(cleanPageTitle('DeepSeek - Chat'), '');
+  assert.equal(cleanPageTitle('Into the Unknown'), '');
+  assert.equal(cleanPageTitle('导出功能讨论 - DeepSeek'), '导出功能讨论');
+  assert.equal(cleanPageTitle('DeepSeek - 导出功能讨论'), '导出功能讨论');
+  assert.equal(cleanPageTitle('DeepSeek 使用指南'), 'DeepSeek 使用指南');
+  assert.equal(cleanPageTitle('  '), '');
 });
