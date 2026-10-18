@@ -16,9 +16,10 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.1';
+    const PLUGIN_VERSION = '1.6.2';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
+    const COMPOSER_NOTICE_MS = 10000;
     const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
     const HANDOFF_FORMATS = ['raw', 'summary', 'conclusion'];
     const HANDOFF_TEMPLATES = ['none', 'implement', 'planFirst', 'review', 'goal', 'planCommand'];
@@ -3102,9 +3103,49 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           if (shell === null || typeof shell.notify !== 'function') return false;
           try {
             shell.notify('info', text);
+            const store = shell.notices;
+            if (store !== null && store !== undefined && typeof store.getSnapshot === 'function') {
+              const current = store.getSnapshot();
+              if (current !== null && current !== undefined && typeof current === 'object') return current;
+            }
             return true;
           } catch (error) {
             console.warn('DeepSeek chat: could not notify the composer', error);
+            return false;
+          }
+        },
+        dismissNotify(sessionId, notice) {
+          const target =
+            sessionId === undefined || sessionId === null || sessionId === ''
+              ? currentSessionId(ctx)
+              : sessionId;
+          if (target === undefined || target === null || target === '') return false;
+          if (notice === null || notice === undefined || notice === true || notice === false) return false;
+          const shell = shellFor(target);
+          const store = shell === null ? null : shell.notices;
+          if (store === null || store === undefined || typeof store.set !== 'function') return false;
+          try {
+            const current = typeof store.getSnapshot === 'function' ? store.getSnapshot() : null;
+            if (current !== null && current !== undefined) {
+              if (
+                typeof notice.seq === 'number' &&
+                typeof current.seq === 'number' &&
+                notice.seq !== current.seq
+              ) {
+                return false;
+              }
+              if (
+                notice.seq === undefined &&
+                typeof notice.text === 'string' &&
+                current.text !== notice.text
+              ) {
+                return false;
+              }
+            }
+            store.set(null);
+            return true;
+          } catch (error) {
+            console.warn('DeepSeek chat: could not dismiss the composer notice', error);
             return false;
           }
         },
@@ -3740,7 +3781,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 const noticeText = t('handoff.returned', { count: payload.count, chars: payload.chars });
                 window.setTimeout(() => {
                   if (typeof delivery.focus === 'function') delivery.focus(sessionId);
-                  if (typeof delivery.notify === 'function') delivery.notify(sessionId, noticeText);
+                  if (typeof delivery.notify !== 'function') return;
+                  const notice = delivery.notify(sessionId, noticeText);
+                  if (
+                    notice !== null &&
+                    notice !== undefined &&
+                    notice !== true &&
+                    notice !== false &&
+                    typeof delivery.dismissNotify === 'function'
+                  ) {
+                    window.setTimeout(() => {
+                      delivery.dismissNotify(sessionId, notice);
+                    }, COMPOSER_NOTICE_MS);
+                  }
                 }, 200);
                 return;
               }

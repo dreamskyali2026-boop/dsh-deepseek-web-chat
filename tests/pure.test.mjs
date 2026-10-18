@@ -511,9 +511,20 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
 
 test('delivery can insert, reveal the target session, focus and notify', () => {
   const calls = { inserted: [], revealed: [], focused: [], notices: [], panels: [] };
+  let noticeSeq = 0;
+  const noticeStore = {
+    current: null,
+    set(value) {
+      this.current = value;
+    },
+    getSnapshot() {
+      return this.current;
+    },
+  };
   const shell = {
     rev: 3,
     projection: { detectText: 'existing draft' },
+    notices: noticeStore,
     actions: {
       insertText(text, span) {
         calls.inserted.push({ text, span });
@@ -525,7 +536,9 @@ test('delivery can insert, reveal the target session, focus and notify', () => {
       calls.focused.push(true);
     },
     notify(level, text) {
+      noticeSeq += 1;
       calls.notices.push({ level, text });
+      noticeStore.set({ level, text, seq: noticeSeq });
     },
   };
   const ctx = {
@@ -558,8 +571,22 @@ test('delivery can insert, reveal the target session, focus and notify', () => {
   assert.deepEqual(calls.revealed, ['s1']);
   assert.equal(delivery.focus('s1'), true);
   assert.deepEqual(calls.focused, [true]);
-  assert.equal(delivery.notify('s1', '已插入'), true);
-  assert.deepEqual(calls.notices, [{ level: 'info', text: '已插入' }]);
+
+  const notice = delivery.notify('s1', '已插入');
+  assert.equal(notice.level, 'info');
+  assert.equal(notice.text, '已插入');
+  assert.deepEqual(calls.notices[0], { level: 'info', text: '已插入' });
+  assert.equal(noticeStore.current.seq, notice.seq);
+  assert.equal(delivery.dismissNotify('s1', notice), true);
+  assert.equal(noticeStore.current, null);
+
+  const first = delivery.notify('s1', '第一条');
+  const second = delivery.notify('s1', '第二条');
+  assert.equal(delivery.dismissNotify('s1', first), false);
+  assert.equal(noticeStore.current, second);
+  assert.equal(delivery.dismissNotify('s1', second), true);
+  assert.equal(noticeStore.current, null);
+  assert.equal(delivery.dismissNotify('s1', true), false);
   const originalWarn = console.warn;
   console.warn = () => {};
   try {
@@ -677,7 +704,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.1');
+  assert.equal(parsed.version, '1.6.2');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
