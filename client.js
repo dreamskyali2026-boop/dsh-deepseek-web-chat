@@ -4978,13 +4978,6 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           console.warn('DeepSeek chat: could not open the native right sidebar tab', error);
           return false;
         }
-        if (panelControl !== null && typeof panelControl.release === 'function') {
-          try {
-            panelControl.release();
-          } catch (error) {
-            console.warn('DeepSeek chat: could not release the full-screen panel', error);
-          }
-        }
         return true;
       };
       const activePanelId = () => {
