@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.3';
+    const PLUGIN_VERSION = '1.6.4';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const COMPOSER_NOTICE_MS = 10000;
@@ -5996,31 +5996,38 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         console.warn('DeepSeek chat: could not register the /deepseek command', error);
       }
 
+      const tabDefinition = () => ({
+        id: TAB_ID,
+        kind: TAB_KIND,
+        title: () => (uiSnapshot.title !== '' ? uiSnapshot.title : t('panel')),
+        keepMounted: true,
+      });
       try {
-        const tabs = ctx.get('sidebarRightTabs');
-        if (tabs !== undefined && tabs !== null && typeof tabs.register === 'function') {
-          ctx.effect(
-            () =>
-              tabs.register({
-                id: TAB_ID,
-                kind: TAB_KIND,
-                title: () => (uiSnapshot.title !== '' ? uiSnapshot.title : t('panel')),
-                keepMounted: true,
-              }),
-            'deepseek-web-chat: right sidebar tab type',
-          );
+        if (typeof ctx.inject === 'function') {
+          ctx.inject(['sidebarRightTabs'], (scope) => {
+            scope.effect(
+              () => scope.sidebarRightTabs.register(tabDefinition()),
+              'deepseek-web-chat: right sidebar tab type',
+            );
+          });
+        } else {
+          const tabs = ctx.get('sidebarRightTabs');
+          if (tabs !== undefined && tabs !== null && typeof tabs.register === 'function') {
+            ctx.effect(() => tabs.register(tabDefinition()), 'deepseek-web-chat: right sidebar tab type');
+          }
         }
       } catch (error) {
         console.warn('DeepSeek chat: could not register the native right sidebar tab type', error);
       }
 
+      const tabInject = () => ({ back, open: openPanel, delivery, listTargets, dockPane });
       ctx.slots.inject('sidebar.right.pane.tab', () =>
         ctx.slots.register(
           {
             name: 'sidebar.right.pane.tab',
             key: TAB_ID,
             locale: NS,
-            inject: () => ({ back, open: openPanel, delivery, listTargets, dockPane }),
+            inject: tabInject,
           },
           ChatPanelTab,
         ),
