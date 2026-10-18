@@ -13,7 +13,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.3.1';
+    const PLUGIN_VERSION = '1.3.2';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
@@ -31,6 +31,7 @@ window.__ModuleLoader__.load({
       dedupe: true,
       idleMinutes: 0,
       autoSend: false,
+      dockRatio: 0.42,
     });
     let panelControl = null;
 
@@ -74,6 +75,11 @@ window.__ModuleLoader__.load({
         dedupe: typeof raw.dedupe === 'boolean' ? raw.dedupe : DEFAULT_SETTINGS.dedupe,
         idleMinutes: idle === 15 || idle === 30 || idle === 60 ? idle : 0,
         autoSend: typeof raw.autoSend === 'boolean' ? raw.autoSend : DEFAULT_SETTINGS.autoSend,
+        dockRatio: (() => {
+          const ratio = Number(raw.dockRatio);
+          if (!Number.isFinite(ratio)) return DEFAULT_SETTINGS.dockRatio;
+          return Math.min(0.7, Math.max(0.2, Math.round(ratio * 1000) / 1000));
+        })(),
       };
     }
 
@@ -350,6 +356,8 @@ window.__ModuleLoader__.load({
       'dock.on': '并排显示',
       'dock.off': '全屏显示',
       'dock.title': '并排显示：边看 Harness 边问 DeepSeek',
+      'dock.resize': '调整并排宽度',
+      'dock.resizeHint': '拖动调整宽度；双击恢复默认；聚焦后按左右方向键微调。',
       'shortcut.toggle': '打开/关闭 DeepSeek 聊天',
       'shortcut.handoff': '把 DeepSeek 对话接力到 Harness',
       'shortcut.noPanel': 'DeepSeek 面板尚未准备好',
@@ -573,6 +581,8 @@ window.__ModuleLoader__.load({
       'dock.on': 'Side by side',
       'dock.off': 'Full screen',
       'dock.title': 'Side by side: keep Harness visible while asking DeepSeek',
+      'dock.resize': 'Resize the side-by-side panel',
+      'dock.resizeHint': 'Drag to resize, double-click to reset, or focus and use the arrow keys.',
       'shortcut.toggle': 'Open or close DeepSeek Chat',
       'shortcut.handoff': 'Hand off the DeepSeek conversation to Harness',
       'shortcut.noPanel': 'The DeepSeek panel is not ready yet',
@@ -1534,6 +1544,52 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   border-radius: 8px;
   background: var(--dsw-alias-bg-base);
 }
+.dsh-dsc-resize {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 40;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+}
+.dsh-dsc-resize::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 2px;
+  height: 28px;
+  transform: translateY(-50%);
+  border-radius: 2px;
+  background: var(--dsw-alias-border-l2);
+  opacity: 0.7;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+.dsh-dsc-resize:hover::before,
+.dsh-dsc-resize:focus-visible::before,
+.dsh-dsc-resize-active::before {
+  background: var(--dsw-alias-state-business-primary);
+  opacity: 1;
+}
+.dsh-dsc-resize::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 0;
+  bottom: 0;
+  width: 1.5px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+.dsh-dsc-resize:hover::after,
+.dsh-dsc-resize:focus-visible::after,
+.dsh-dsc-resize-active::after {
+  background: var(--dsw-alias-state-business-primary);
+}
+.dsh-dsc-resize:focus-visible { outline: none; }
 @media (max-width: 720px) {
   .dsh-dsc-preview { padding: 10px; }
   .dsh-dsc-preview-card { padding: 12px; }
@@ -1645,8 +1701,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return Math.max(1, Math.ceil(cjk * 1.05 + rest / 3.6));
     }
 
-    function dockGeometry() {
-      const width = Math.min(760, Math.max(420, Math.round(window.innerWidth * 0.42)));
+    function clampDockWidth(value) {
+      const viewport = Math.max(320, window.innerWidth);
+      const min = Math.min(360, Math.round(viewport * 0.6));
+      const max = Math.max(min, viewport - 360);
+      const width = Number.isFinite(value) ? Math.round(value) : Math.round(viewport * DEFAULT_SETTINGS.dockRatio);
+      return Math.min(max, Math.max(min, width));
+    }
+
+    function dockGeometry(ratio) {
+      const safe = Number.isFinite(ratio) ? ratio : DEFAULT_SETTINGS.dockRatio;
+      const width = clampDockWidth(window.innerWidth * safe);
       return {
         left: Math.max(0, window.innerWidth - width),
         top: 0,
@@ -2725,6 +2790,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [reverseText, setReverseText] = React.useState('');
       const [health, setHealth] = React.useState(null);
       const [healthDismissed, setHealthDismissed] = React.useState(false);
+      const [dockDragging, setDockDragging] = React.useState(false);
+      const dockDragRef = React.useRef(null);
       const hostRef = React.useRef(null);
       const panelRootRef = React.useRef(null);
       const viewRef = React.useRef(null);
@@ -2804,7 +2871,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
       React.useLayoutEffect(() => {
         if (!docked) return undefined;
-        const update = () => setDockRect(dockGeometry());
+        const update = () => setDockRect(dockGeometry(settingsRef.current.dockRatio));
         update();
         window.addEventListener('resize', update);
         return () => window.removeEventListener('resize', update);
@@ -2976,10 +3043,95 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           open();
           return;
         }
-        setDockRect(dockGeometry());
+        setDockRect(dockGeometry(settingsRef.current.dockRatio));
         setDocked(true);
         back();
       }, [docked, open, back]);
+
+      const resizeDockTo = React.useCallback((width) => {
+        const next = clampDockWidth(width);
+        setDockRect({
+          left: Math.max(0, window.innerWidth - next),
+          top: 0,
+          width: next,
+          height: window.innerHeight,
+        });
+        return next;
+      }, []);
+
+      const saveDockRatio = React.useCallback(
+        (width) => {
+          if (!Number.isFinite(width) || window.innerWidth <= 0) return;
+          const ratio = Math.min(0.7, Math.max(0.2, Math.round((width / window.innerWidth) * 1000) / 1000));
+          updateSetting('dockRatio', ratio);
+        },
+        [updateSetting],
+      );
+
+      const startDockResize = React.useCallback(
+        (event) => {
+          if (!docked || event.button !== 0) return;
+          const current = dockRect === null ? dockGeometry(settingsRef.current.dockRatio) : dockRect;
+          dockDragRef.current = {
+            startX: event.clientX,
+            startWidth: current.width,
+            lastWidth: current.width,
+            pointerId: event.pointerId,
+          };
+          setDockDragging(true);
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+          } catch (error) {
+            /* Pointer capture is best effort. */
+          }
+          event.preventDefault();
+        },
+        [docked, dockRect],
+      );
+
+      const moveDockResize = React.useCallback(
+        (event) => {
+          const drag = dockDragRef.current;
+          if (drag === null) return;
+          const width = resizeDockTo(drag.startWidth + (drag.startX - event.clientX));
+          drag.lastWidth = width;
+          event.preventDefault();
+        },
+        [resizeDockTo],
+      );
+
+      const endDockResize = React.useCallback(
+        (event) => {
+          const drag = dockDragRef.current;
+          if (drag === null) return;
+          dockDragRef.current = null;
+          setDockDragging(false);
+          try {
+            event.currentTarget.releasePointerCapture(drag.pointerId);
+          } catch (error) {
+            /* Releasing pointer capture is best effort. */
+          }
+          saveDockRatio(drag.lastWidth);
+        },
+        [saveDockRatio],
+      );
+
+      const resetDockWidth = React.useCallback(() => {
+        setDockRect(dockGeometry(DEFAULT_SETTINGS.dockRatio));
+        saveDockRatio(clampDockWidth(window.innerWidth * DEFAULT_SETTINGS.dockRatio));
+      }, [saveDockRatio]);
+
+      const keyDockResize = React.useCallback(
+        (event) => {
+          if (!docked) return;
+          const current = dockRect === null ? dockGeometry(settingsRef.current.dockRatio) : dockRect;
+          const delta = event.key === 'ArrowLeft' ? 40 : event.key === 'ArrowRight' ? -40 : 0;
+          if (delta === 0) return;
+          event.preventDefault();
+          saveDockRatio(resizeDockTo(current.width + delta));
+        },
+        [docked, dockRect, resizeDockTo, saveDockRatio],
+      );
 
       const commitHandoff = React.useCallback(
         async (payload) => {
@@ -3870,7 +4022,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         );
       }
 
-      const geometry = docked ? (dockRect === null ? dockGeometry() : dockRect) : rect;
+      const geometry = docked ? (dockRect === null ? dockGeometry(settingsRef.current.dockRatio) : dockRect) : rect;
       const panelStyle = {
         left: geometry === null ? 0 : geometry.left,
         top: geometry === null ? 0 : geometry.top,
@@ -4639,6 +4791,25 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             h(IconButton, { label: t('reload'), onClick: reload }, h(ReloadGlyph, { size: 15 })),
             h(IconButton, { label: t('openExternal'), onClick: openExternal }, h(ExternalGlyph, { size: 15 })),
           ),
+          docked
+            ? h('div', {
+                className: 'dsh-dsc-resize' + (dockDragging ? ' dsh-dsc-resize-active' : ''),
+                role: 'separator',
+                'aria-orientation': 'vertical',
+                'aria-label': t('dock.resize'),
+                'aria-valuemin': 280,
+                'aria-valuemax': Math.max(320, window.innerWidth - 320),
+                'aria-valuenow': geometry === null ? 0 : geometry.width,
+                tabIndex: 0,
+                title: t('dock.resizeHint'),
+                onPointerDown: startDockResize,
+                onPointerMove: moveDockResize,
+                onPointerUp: endDockResize,
+                onPointerCancel: endDockResize,
+                onDoubleClick: resetDockWidth,
+                onKeyDown: keyDockResize,
+              })
+            : null,
           healthBanner,
           h(
             'div',
@@ -4834,6 +5005,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         templateDirective,
         handoffHash,
         cleanPageTitle,
+        clampDockWidth,
+        dockGeometry,
         normalizeSettings,
         loadSettings,
         saveSettings,

@@ -42,6 +42,8 @@ const {
   buildStructuredSummary,
   handoffHash,
   cleanPageTitle,
+  clampDockWidth,
+  dockGeometry,
   normalizeSettings,
   loadSettings,
   saveSettings,
@@ -319,6 +321,7 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
     );
     const flat = JSON.stringify(panel);
     assert.match(flat, /dsh-dsc-panel-docked/);
+    assert.match(flat, /dsh-dsc-resize/);
     assert.match(flat, /dsh-dsc-preview/);
     assert.match(flat, /dsh-dsc-toast/);
     assert.match(flat, /preview\.insert/);
@@ -499,7 +502,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.3.1');
+  assert.equal(parsed.version, '1.3.2');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
@@ -583,4 +586,21 @@ test('cleanPageTitle drops DeepSeek default titles but keeps real conversation t
   assert.equal(cleanPageTitle('DeepSeek - 导出功能讨论'), '导出功能讨论');
   assert.equal(cleanPageTitle('DeepSeek 使用指南'), 'DeepSeek 使用指南');
   assert.equal(cleanPageTitle('  '), '');
+});
+
+test('dock geometry clamps width and honors the saved ratio', () => {
+  const previous = globalThis.window;
+  globalThis.window = { ...previous, innerWidth: 1600, innerHeight: 900 };
+  try {
+    assert.equal(clampDockWidth(100), 360);
+    assert.equal(clampDockWidth(9999), 1240);
+    const geometry = dockGeometry(0.42);
+    assert.equal(geometry.width, 672);
+    assert.equal(geometry.left, 928);
+    assert.equal(geometry.height, 900);
+    assert.equal(dockGeometry(0.7).width, 1120);
+    assert.equal(dockGeometry(0.28).width, 448);
+  } finally {
+    globalThis.window = previous;
+  }
 });
