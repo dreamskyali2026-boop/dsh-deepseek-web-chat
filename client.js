@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.7';
+    const PLUGIN_VERSION = '1.6.8';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const COMPOSER_NOTICE_MS = 10000;
@@ -868,7 +868,7 @@ window.__ModuleLoader__.load({
   box-shadow: none;
 }
 .dsh-dsc-panel-embedded .dsh-dsc-bar {
-  height: 44px;
+  height: var(--dsh-dsc-embedded-bar-height, 38px);
   padding-top: 0;
 }
 .dsh-dsc-panel-quick {
@@ -1966,6 +1966,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         width,
         height: window.innerHeight,
       };
+    }
+
+    // The native right sidebar mounts this panel below the dockkit tab strip
+    // (28px row + 10px top padding = 38px). The conversation header in the main
+    // column is min-height 76px in the shipped shell. 76 - 38 = 38px puts the
+    // embedded bar's bottom divider on the conversation header's divider.
+    const EMBEDDED_BAR_DEFAULT_HEIGHT = 38;
+    const EMBEDDED_BAR_MIN_HEIGHT = 38;
+    const EMBEDDED_BAR_VAR = '--dsh-dsc-embedded-bar-height';
+
+    function embeddedBarHeight(headerBottom, paneTop) {
+      const header = Number(headerBottom);
+      const pane = Number(paneTop);
+      if (!Number.isFinite(header) || !Number.isFinite(pane)) return EMBEDDED_BAR_DEFAULT_HEIGHT;
+      const next = Math.round(header - pane);
+      if (!Number.isFinite(next)) return EMBEDDED_BAR_DEFAULT_HEIGHT;
+      return Math.max(EMBEDDED_BAR_MIN_HEIGHT, next);
     }
 
     function menuLayout(anchor, panel, viewport) {
@@ -3522,6 +3539,59 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       React.useEffect(() => {
         visibleRef.current = visible;
       }, [visible]);
+
+      // In the native right sidebar the panel sits under the dockkit tab strip.
+      // Size the bar so its bottom divider lands on the conversation header's
+      // divider (header bottom edge minus this pane's top edge). When the header
+      // cannot be measured, the CSS default stays: 38px, aligned with the shell's
+      // default 76px conversation header.
+      React.useEffect(() => {
+        if (!embedded || !visible) return undefined;
+        const root = panelRootRef.current;
+        if (root === null) return undefined;
+        let frame = 0;
+        let timers = [];
+        let header = null;
+        let bodyObserver = null;
+        let headerObserver = null;
+        const apply = () => {
+          frame = 0;
+          if (header !== null && header.isConnected !== true) {
+            if (headerObserver !== null) headerObserver.disconnect();
+            header = null;
+          }
+          const found =
+            typeof document.querySelector === 'function'
+              ? document.querySelector('[data-conversation-header-leading]')
+              : null;
+          const host = found !== null && typeof found.closest === 'function' ? found.closest('header') : null;
+          if (host === null) return;
+          const height = embeddedBarHeight(host.getBoundingClientRect().bottom, root.getBoundingClientRect().top);
+          root.style.setProperty(EMBEDDED_BAR_VAR, height + 'px');
+          if (host !== header) {
+            if (headerObserver !== null) headerObserver.disconnect();
+            header = host;
+            if (headerObserver !== null) headerObserver.observe(host);
+          }
+        };
+        const schedule = () => {
+          if (frame !== 0) return;
+          frame = window.requestAnimationFrame(apply);
+        };
+        apply();
+        timers = [120, 400].map((delay) => window.setTimeout(schedule, delay));
+        if (typeof ResizeObserver === 'function') {
+          bodyObserver = new ResizeObserver(schedule);
+          if (document.body !== null) bodyObserver.observe(document.body);
+          headerObserver = new ResizeObserver(schedule);
+        }
+        return () => {
+          if (frame !== 0) window.cancelAnimationFrame(frame);
+          for (const timer of timers) window.clearTimeout(timer);
+          if (bodyObserver !== null) bodyObserver.disconnect();
+          if (headerObserver !== null) headerObserver.disconnect();
+        };
+      }, [embedded, visible]);
 
       React.useEffect(() => {
         if (!visible) return;
@@ -6338,6 +6408,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         clampDockWidth,
         dockGeometry,
         quickGeometry,
+        embeddedBarHeight,
         menuLayout,
         normalizeSettings,
         loadSettings,

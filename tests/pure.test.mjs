@@ -48,6 +48,7 @@ const {
   clampDockWidth,
   dockGeometry,
   quickGeometry,
+  embeddedBarHeight,
   menuLayout,
   normalizeSettings,
   loadSettings,
@@ -755,7 +756,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.7');
+  assert.equal(parsed.version, '1.6.8');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
@@ -992,6 +993,34 @@ test('cleanPageTitle drops DeepSeek default titles but keeps real conversation t
   assert.equal(cleanPageTitle('DeepSeek - 导出功能讨论'), '导出功能讨论');
   assert.equal(cleanPageTitle('DeepSeek 使用指南'), 'DeepSeek 使用指南');
   assert.equal(cleanPageTitle('  '), '');
+});
+
+test('embedded bar height aligns with the conversation header divider', () => {
+  // Shipped shell geometry: 76px conversation header above a 38px dockkit strip.
+  assert.equal(embeddedBarHeight(76, 38), 38);
+  // A taller header (breadcrumbs, future shell changes) grows the bar with it.
+  assert.equal(embeddedBarHeight(90, 38), 52);
+  // Sub-pixel measurements round to whole pixels.
+  assert.equal(embeddedBarHeight(76.4, 38.2), 38);
+  assert.equal(embeddedBarHeight(76.5, 38), 39);
+  // A blank session (no divider to align with) keeps the bar usable.
+  assert.equal(embeddedBarHeight(20, 38), 38);
+  assert.equal(embeddedBarHeight(38, 38), 38);
+  // Missing measurements fall back to the aligned default instead of NaN.
+  assert.equal(embeddedBarHeight(null, 38), 38);
+  assert.equal(embeddedBarHeight(76, undefined), 38);
+  assert.equal(embeddedBarHeight(Number.NaN, Number.NaN), 38);
+});
+
+test('embedded bar CSS derives its height from the measured variable', () => {
+  const match = source.match(/\.dsh-dsc-panel-embedded \.dsh-dsc-bar\s*\{[^}]*\}/);
+  assert.ok(match !== null, 'embedded bar rule exists');
+  assert.match(match[0], /height:\s*var\(--dsh-dsc-embedded-bar-height,\s*38px\)/);
+  assert.doesNotMatch(match[0], /height:\s*44px/);
+  // The quick panel keeps its own fixed header; only the embedded bar tracks the shell.
+  const quick = source.match(/\.dsh-dsc-panel-quick \.dsh-dsc-bar\s*\{[^}]*\}/);
+  assert.ok(quick !== null, 'quick bar rule exists');
+  assert.match(quick[0], /height:\s*44px/);
 });
 
 test('dock geometry clamps width and honors the saved ratio', () => {
