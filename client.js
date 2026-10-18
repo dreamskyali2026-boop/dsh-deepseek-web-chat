@@ -9,8 +9,227 @@ window.__ModuleLoader__.load({
     const TARGET = 'https://chat.deepseek.com/';
     const WORKSPACE_KEY = 'dsh-deepseek-web-chat';
     const ONBOARDING_KEY = 'dsh-deepseek-web-chat.onboarding.v1';
+    const SETTINGS_KEY = 'dsh-deepseek-web-chat.settings.v1';
+    const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
+    const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
+    const PLUGIN_VERSION = '1.3.0';
+    const SELECTOR_VERSION = 1;
+    const HANDOFF_LIMIT = 20000;
+    const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
+    const HANDOFF_FORMATS = ['raw', 'summary', 'conclusion'];
+    const HANDOFF_TEMPLATES = ['none', 'implement', 'planFirst', 'review', 'goal', 'planCommand'];
+    const SCENARIO_TEMPLATES = ['review', 'compare', 'code', 'paper', 'copy'];
+    const HISTORY_LIMIT = 20;
+    const DEFAULT_SETTINGS = Object.freeze({
+      defaultMode: 'all',
+      defaultFormat: 'raw',
+      longThreshold: HANDOFF_LIMIT,
+      safety: true,
+      returnToHarness: true,
+      notify: true,
+      dedupe: true,
+      idleMinutes: 0,
+      autoSend: false,
+    });
     let panelControl = null;
+
+    function readJson(key, fallback) {
+      try {
+        const raw = window.localStorage.getItem(key);
+        if (raw === null || raw === undefined || raw === '') return fallback;
+        const parsed = JSON.parse(raw);
+        return parsed === null || parsed === undefined ? fallback : parsed;
+      } catch (error) {
+        return fallback;
+      }
+    }
+
+    function writeJson(key, value) {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value));
+        return true;
+      } catch (error) {
+        return false;
+      }
+    }
+
+    function normalizeSettings(value) {
+      const raw = value !== null && typeof value === 'object' ? value : {};
+      const mode = HANDOFF_MODES.includes(raw.defaultMode) ? raw.defaultMode : DEFAULT_SETTINGS.defaultMode;
+      const format = HANDOFF_FORMATS.includes(raw.defaultFormat) ? raw.defaultFormat : DEFAULT_SETTINGS.defaultFormat;
+      const threshold = Number(raw.longThreshold);
+      const idle = Number(raw.idleMinutes);
+      return {
+        defaultMode: mode,
+        defaultFormat: format,
+        longThreshold:
+          Number.isFinite(threshold) && threshold >= 1000 && threshold <= 200000
+            ? Math.round(threshold)
+            : DEFAULT_SETTINGS.longThreshold,
+        safety: typeof raw.safety === 'boolean' ? raw.safety : DEFAULT_SETTINGS.safety,
+        returnToHarness:
+          typeof raw.returnToHarness === 'boolean' ? raw.returnToHarness : DEFAULT_SETTINGS.returnToHarness,
+        notify: typeof raw.notify === 'boolean' ? raw.notify : DEFAULT_SETTINGS.notify,
+        dedupe: typeof raw.dedupe === 'boolean' ? raw.dedupe : DEFAULT_SETTINGS.dedupe,
+        idleMinutes: idle === 15 || idle === 30 || idle === 60 ? idle : 0,
+        autoSend: typeof raw.autoSend === 'boolean' ? raw.autoSend : DEFAULT_SETTINGS.autoSend,
+      };
+    }
+
+    function loadSettings() {
+      return normalizeSettings(readJson(SETTINGS_KEY, null));
+    }
+
+    function saveSettings(settings) {
+      return writeJson(SETTINGS_KEY, normalizeSettings(settings));
+    }
+
+    function loadHistory() {
+      const raw = readJson(HISTORY_KEY, []);
+      if (!Array.isArray(raw)) return [];
+      return raw
+        .filter((row) => row !== null && typeof row === 'object' && typeof row.hash === 'string')
+        .slice(0, HISTORY_LIMIT);
+    }
+
+    function saveHistory(rows) {
+      return writeJson(HISTORY_KEY, (Array.isArray(rows) ? rows : []).slice(0, HISTORY_LIMIT));
+    }
+
+    function recordHandoffHistory(entry) {
+      const rows = loadHistory();
+      const row = {
+        id: String(entry.hash) + '-' + String(Date.now()),
+        time: Date.now(),
+        source: 'DeepSeek Web Chat',
+        hash: String(entry.hash),
+        format: HANDOFF_FORMATS.includes(entry.format) ? entry.format : 'raw',
+        template: HANDOFF_TEMPLATES.includes(entry.template) ? entry.template : 'none',
+        messages: Array.isArray(entry.messages)
+          ? entry.messages.map((message) => ({ role: message.role, text: String(message.text || '') }))
+          : [],
+        chars: Number(entry.chars) || 0,
+        tokens: Number(entry.tokens) || 0,
+        targetTitle: typeof entry.targetTitle === 'string' ? entry.targetTitle : '',
+        text: typeof entry.text === 'string' ? entry.text.slice(0, 60000) : '',
+      };
+      const next = [row, ...rows].slice(0, HISTORY_LIMIT);
+      saveHistory(next);
+      return next;
+    }
+
+    function loadMetrics() {
+      const raw = readJson(METRICS_KEY, null);
+      if (raw === null || typeof raw !== 'object' || typeof raw.counts !== 'object' || raw.counts === null) {
+        return { since: Date.now(), counts: {}, sums: {} };
+      }
+      return {
+        since: Number(raw.since) || Date.now(),
+        counts: raw.counts,
+        sums: raw.sums !== null && typeof raw.sums === 'object' ? raw.sums : {},
+      };
+    }
+
+    function track(event, props) {
+      try {
+        const metrics = loadMetrics();
+        metrics.counts[event] = (Number(metrics.counts[event]) || 0) + 1;
+        if (props !== null && typeof props === 'object') {
+          if (Number.isFinite(props.duration_ms)) {
+            metrics.sums[event + '.duration_ms'] =
+              (Number(metrics.sums[event + '.duration_ms']) || 0) + props.duration_ms;
+          }
+          if (Number.isFinite(props.chars)) {
+            metrics.sums[event + '.chars'] = (Number(metrics.sums[event + '.chars']) || 0) + props.chars;
+          }
+        }
+        writeJson(METRICS_KEY, metrics);
+      } catch (error) {
+        /* Local metrics are best effort and never contain conversation text. */
+      }
+    }
+
+    function handoffHash(messages, format, template) {
+      let hash = 2166136261;
+      const feed = (value) => {
+        const text = String(value || '');
+        for (let index = 0; index < text.length; index += 1) {
+          hash ^= text.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+      };
+      feed(format);
+      feed('\u0000');
+      feed(template);
+      for (const message of Array.isArray(messages) ? messages : []) {
+        feed('\u0000');
+        feed(message.role);
+        feed('\u0001');
+        feed(message.text);
+      }
+      return (hash >>> 0).toString(36);
+    }
+
+    function templateDirective(template, t) {
+      switch (template) {
+        case 'implement':
+          return t('template.implement.directive');
+        case 'planFirst':
+          return t('template.planFirst.directive');
+        case 'review':
+          return t('template.review.directive');
+        case 'goal':
+          return t('template.goal.directive');
+        case 'planCommand':
+          return t('template.planCommand.directive');
+        default:
+          return '';
+      }
+    }
+
+    let uiSnapshot = { unread: 0, title: '' };
+    const uiSubscribers = new Set();
+
+    function subscribeUi(listener) {
+      uiSubscribers.add(listener);
+      return () => {
+        uiSubscribers.delete(listener);
+      };
+    }
+
+    function getUiSnapshot() {
+      return uiSnapshot;
+    }
+
+    function patchUi(patch) {
+      uiSnapshot = { ...uiSnapshot, ...patch };
+      for (const listener of [...uiSubscribers]) {
+        try {
+          listener();
+        } catch (error) {
+          console.error('DeepSeek chat: ui listener failed', error);
+        }
+      }
+    }
+
+    function useUiSnapshot() {
+      return React.useSyncExternalStore(subscribeUi, getUiSnapshot, getUiSnapshot);
+    }
+
+    function setUnread(value) {
+      const next = Math.max(0, Math.round(Number(value) || 0));
+      if (next !== uiSnapshot.unread) patchUi({ unread: next });
+    }
+
+    function bumpUnread() {
+      setUnread(uiSnapshot.unread + 1);
+    }
+
+    function setPanelTitle(title) {
+      const next = typeof title === 'string' ? title.trim() : '';
+      if (next !== uiSnapshot.title) patchUi({ title: next });
+    }
     const WHALE_PATH = 'M48.8354 10.0479C48.3232 9.79199 48.1025 10.2798 47.8032 10.5278C47.7007 10.6079 47.6143 10.7119 47.5273 10.8076C46.7793 11.624 45.9048 12.1597 44.7622 12.0957C43.0923 12 41.666 12.5356 40.4058 13.8398C40.1377 12.2319 39.2476 11.272 37.8926 10.6558C37.1836 10.3359 36.4668 10.0156 35.9702 9.31982C35.6235 8.82373 35.5293 8.27197 35.356 7.72754C35.2456 7.3999 35.1353 7.06396 34.7651 7.00781C34.3633 6.94385 34.2056 7.2876 34.0479 7.57568C33.418 8.75195 33.1733 10.0479 33.1973 11.3599C33.2524 14.312 34.4736 16.6641 36.8999 18.3359C37.1758 18.5278 37.2466 18.7197 37.1597 19C36.9946 19.5757 36.7974 20.1357 36.624 20.7119C36.5137 21.0801 36.3486 21.1597 35.9624 21C34.6309 20.4321 33.481 19.5918 32.4644 18.5757C30.7393 16.8721 29.1792 14.9917 27.2334 13.52C26.7764 13.1758 26.3193 12.856 25.8467 12.5518C23.8618 10.584 26.1069 8.96777 26.627 8.77588C27.1704 8.57568 26.8159 7.8877 25.0591 7.896C23.3022 7.90381 21.6953 8.50391 19.647 9.30371C19.3477 9.42383 19.0322 9.51172 18.7095 9.58398C16.8501 9.22363 14.9199 9.14355 12.9033 9.37598C9.10596 9.80762 6.07275 11.6396 3.84326 14.7681C1.16455 18.5278 0.53418 22.7998 1.30664 27.2559C2.11768 31.9521 4.46582 35.8398 8.07373 38.8799C11.8159 42.0322 16.1255 43.5762 21.041 43.2803C24.0269 43.104 27.3516 42.6963 31.1016 39.4561C32.0469 39.936 33.0396 40.1279 34.686 40.272C35.9546 40.3921 37.1758 40.208 38.1211 40.0078C39.6021 39.688 39.4995 38.2881 38.9639 38.0322C34.623 35.9678 35.5762 36.8081 34.71 36.1279C36.9155 33.4639 40.2402 30.6958 41.54 21.728C41.6426 21.0161 41.5557 20.5679 41.54 19.9917C41.5322 19.6396 41.6108 19.5039 42.0049 19.4639C43.0923 19.3359 44.1479 19.0317 45.1167 18.4878C47.9292 16.9199 49.064 14.3438 49.3315 11.2559C49.3711 10.7837 49.3237 10.2959 48.8354 10.0479ZM24.3262 37.8398C20.1196 34.4639 18.0791 33.3521 17.2358 33.3999C16.4482 33.4482 16.5898 34.3682 16.7632 34.9678C16.9443 35.5601 17.1812 35.9683 17.5117 36.4878C17.7402 36.832 17.8979 37.3442 17.2832 37.728C15.9282 38.584 13.5728 37.4399 13.4624 37.3838C10.7207 35.7358 8.42822 33.5601 6.81348 30.584C5.25342 27.7197 4.34766 24.6479 4.19775 21.3677C4.1582 20.5757 4.38672 20.2959 5.15869 20.1519C6.17529 19.96 7.22314 19.9199 8.23926 20.0718C12.5327 20.7119 16.1885 22.6719 19.2529 25.7759C21.002 27.5439 22.3252 29.6558 23.6885 31.7202C25.1377 33.9121 26.6978 36 28.6831 37.7119C29.3843 38.312 29.9434 38.7681 30.479 39.104C28.8643 39.2881 26.1699 39.3281 24.3262 37.8398ZM26.3433 24.6001C26.3433 24.248 26.6191 23.9678 26.9658 23.9678C27.0444 23.9678 27.1152 23.9839 27.1782 24.0078C27.2651 24.04 27.3438 24.0879 27.4067 24.1602C27.5171 24.272 27.5801 24.4321 27.5801 24.6001C27.5801 24.9521 27.3042 25.2319 26.9575 25.2319C26.6108 25.2319 26.3433 24.9521 26.3433 24.6001ZM32.6064 27.8799C32.2046 28.0479 31.8027 28.1919 31.4165 28.208C30.8179 28.2397 30.1641 27.9922 29.8096 27.688C29.2583 27.2158 28.8643 26.9521 28.6987 26.1279C28.6279 25.7759 28.6675 25.2319 28.7305 24.9199C28.8721 24.248 28.7144 23.8159 28.2495 23.4238C27.8716 23.104 27.3911 23.0161 26.8633 23.0161C26.666 23.0161 26.4849 22.9277 26.3511 22.856C26.1304 22.7441 25.9492 22.4639 26.1226 22.1201C26.1777 22.0078 26.4458 21.7358 26.5088 21.688C27.2256 21.272 28.0527 21.4077 28.8169 21.7197C29.5259 22.0161 30.0615 22.5601 30.834 23.3281C31.6216 24.2559 31.7632 24.5117 32.2124 25.208C32.5669 25.752 32.8901 26.312 33.1104 26.9521C33.2446 27.3521 33.0713 27.6802 32.6064 27.8799Z';
 
     const zh = {
@@ -118,6 +337,120 @@ window.__ModuleLoader__.load({
       'shortcut.noPanel': 'DeepSeek 面板尚未准备好',
       'command.open': '打开 DeepSeek 聊天',
       'command.open.desc': '用网页版 DeepSeek 讨论，再把结论接力到 Harness',
+      'menu.history': '接力历史…',
+      'menu.reverse': '把 Harness 上下文带到 DeepSeek…',
+      'menu.diagnostics': '页面诊断',
+      'menu.settings': '设置…',
+      'preview.format': '交接格式',
+      'preview.format.raw': '原文',
+      'preview.format.summary': '结构化摘要',
+      'preview.format.conclusion': '仅结论',
+      'preview.template': '任务指令',
+      'preview.template.none': '只插入，不加指令',
+      'preview.template.implement': '按此实现',
+      'preview.template.planFirst': '先给计划',
+      'preview.template.review': '代码 / 方案审查',
+      'preview.template.goal': '作为 /goal',
+      'preview.template.planCommand': '作为 /plan',
+      'preview.autoSend': '插入后立即发送',
+      'preview.autoSendHint': '会直接发送到 Harness，不再由你确认。建议先检查最终文本。',
+      'preview.send': '插入并发送',
+      'preview.export': '导出 .md',
+      'preview.dedupe': '这段内容已接力过：{time}',
+      'preview.dedupeHint': '仍然可以再插入一次，或先修改勾选的消息。',
+      'preview.summaryRatio': '摘要为原文的 {percent}%',
+      'summary.background': '背景',
+      'summary.goal': '目标',
+      'summary.constraints': '约束',
+      'summary.decisions': '关键决策',
+      'summary.todos': '待办',
+      'summary.acceptance': '验收标准',
+      'summary.none': '（对话中未明确）',
+      'summary.truncated': '注：摘要已按比例压缩，完整细节请回到 DeepSeek 查看。',
+      'handoff.summaryHeading': '## 结构化交接',
+      'handoff.conclusionHeading': '## 结论',
+      'handoff.directiveHeading': '## 任务指令',
+      'handoff.copyOnly': '仅复制，不插入',
+      'history.title': '接力历史',
+      'history.empty': '还没有接力记录。',
+      'history.clear': '清空历史',
+      'history.clearConfirm': '清空全部接力历史？',
+      'history.copy': '复制',
+      'history.reuse': '再次接力',
+      'history.delete': '删除',
+      'history.target': '目标',
+      'history.meta': '{format} · {chars} 字 · {tokens} tokens',
+      'history.copied': '已复制历史内容',
+      'history.cleared': '接力历史已清空',
+      'reverse.title': '把 Harness 上下文带到 DeepSeek',
+      'reverse.desc': '把当前会话、选中的文字或报错填进 DeepSeek 输入框；不会自动发送。',
+      'reverse.session': '当前会话',
+      'reverse.selection': 'Harness 选区',
+      'reverse.extra': '补充说明 / 报错',
+      'reverse.extraPlaceholder': '例如：这段代码报错 xxx；请帮我分析原因。',
+      'reverse.fill': '填入 DeepSeek 输入框',
+      'reverse.filled': '已填入 DeepSeek 输入框，请检查后发送',
+      'reverse.noSelection': '（没有捕获到 Harness 选区）',
+      'reverse.noSession': '（没有打开的 Harness 会话）',
+      'reverse.failed': '填入失败，请先在 DeepSeek 页面登录并打开对话',
+      'settings.title': 'DeepSeek 聊天设置',
+      'settings.close': '关闭',
+      'settings.defaultMode': '默认接力范围',
+      'settings.defaultFormat': '默认交接格式',
+      'settings.longThreshold': '长内容提醒阈值（字符）',
+      'settings.safety': '默认标记为外部资料',
+      'settings.return': '插入后返回 Harness',
+      'settings.notify': 'DeepSeek 回复完成时通知',
+      'settings.dedupe': '重复接力时提醒',
+      'settings.idle': '空闲释放页面',
+      'settings.idleOff': '不释放',
+      'settings.idleHint': '释放后再次打开需要重新登录 DeepSeek 网页版。',
+      'settings.autoSend': '允许在预览里选择「插入并发送」',
+      'settings.autoSendHint': '关闭后只能插入为草稿，发送始终需要你手动确认。',
+      'settings.stats': '本地统计',
+      'settings.statsBody': '打开 {open} 次 · 接力 {preview} 次 · 成功 {ok} 次 · 失败 {failed} 次 · 撤销 {undo} 次',
+      'settings.copyStats': '复制统计',
+      'settings.copyDiagnostics': '复制诊断信息',
+      'settings.clearHistory': '清空接力历史',
+      'settings.reset': '恢复默认设置',
+      'settings.resetDone': '已恢复默认设置',
+      'settings.saved': '设置已保存',
+      'health.banner': '页面结构可能已改版，接力可能失败。',
+      'health.detail': '已识别到登录状态，但没找到可写入的输入框或消息节点。',
+      'health.copy': '复制诊断',
+      'health.dismiss': '忽略',
+      'health.ok': '页面自检正常',
+      'health.failed': '页面自检失败：{detail}',
+      'health.diagnosticsCopied': '诊断信息已复制（不含对话内容）',
+      'notify.doneTitle': 'DeepSeek 回复完成',
+      'notify.doneBody': '{title}：{preview}',
+      'notify.denied': '系统通知权限未开启，未读徽标仍会记录',
+      'notify.inPanel': 'DeepSeek 已回复',
+      'toast.exported': '已导出 {name}',
+      'toast.sendFailed': '已插入，但自动发送失败，请在输入框手动发送',
+      'toast.sent': '已插入并发送',
+      'toast.noDiagnostics': '当前没有可用的页面诊断信息',
+      'template.implement.directive': '请按以上讨论实现。先给一句简短计划，再修改代码，并说明如何验证。',
+      'template.planFirst.directive': '请先只给出实施计划（步骤、涉及文件、风险、验证方式），暂时不要修改代码。',
+      'template.review.directive': '请把以上内容当作待审查的需求或方案，指出问题、风险、遗漏，并给出改进建议。',
+      'template.goal.directive': '基于以下 DeepSeek 讨论推进这个任务。',
+      'template.planCommand.directive': '基于以下 DeepSeek 讨论制定计划。',
+      'scenario.title': '场景模板',
+      'scenario.review': '需求评审',
+      'scenario.review.prompt':
+        '请帮我评审下面的需求：它要解决什么问题、目标用户是谁、有哪些隐含假设、边界条件和风险？请给出必须澄清的问题清单。',
+      'scenario.compare': '方案对比',
+      'scenario.compare.prompt':
+        '请对比下面几个方案：从收益、成本、风险、可维护性和迁移成本五个维度列表比较，最后给出推荐方案和适用条件。',
+      'scenario.code': '代码审查',
+      'scenario.code.prompt':
+        '请审查下面的代码：先指出正确性和安全问题，再看边界条件、性能和可读性；按严重程度排序，并给出具体修改建议。',
+      'scenario.paper': '论文精读',
+      'scenario.paper.prompt':
+        '请精读下面的材料：用一句话概括核心贡献，列出方法、实验设置、主要结论和局限；再解释关键公式或术语。',
+      'scenario.copy': '文案撰写',
+      'scenario.copy.prompt':
+        '请为下面的产品写三版文案：分别面向新用户、犹豫用户和老用户；每版包含标题、一句话卖点和行动号召。',
     };
 
     const en = {
@@ -225,6 +558,120 @@ window.__ModuleLoader__.load({
       'shortcut.noPanel': 'The DeepSeek panel is not ready yet',
       'command.open': 'Open DeepSeek Chat',
       'command.open.desc': 'Discuss in DeepSeek Web, then hand the conclusion off to Harness',
+      'menu.history': 'Handoff history…',
+      'menu.reverse': 'Bring Harness context to DeepSeek…',
+      'menu.diagnostics': 'Page diagnostics',
+      'menu.settings': 'Settings…',
+      'preview.format': 'Format',
+      'preview.format.raw': 'Transcript',
+      'preview.format.summary': 'Structured summary',
+      'preview.format.conclusion': 'Conclusion only',
+      'preview.template': 'Task instruction',
+      'preview.template.none': 'Insert only, no instruction',
+      'preview.template.implement': 'Implement this',
+      'preview.template.planFirst': 'Plan first',
+      'preview.template.review': 'Review this',
+      'preview.template.goal': 'As /goal',
+      'preview.template.planCommand': 'As /plan',
+      'preview.autoSend': 'Send immediately after inserting',
+      'preview.autoSendHint': 'Sends to Harness without another confirmation. Check the final text first.',
+      'preview.send': 'Insert & send',
+      'preview.export': 'Export .md',
+      'preview.dedupe': 'This content was handed off before: {time}',
+      'preview.dedupeHint': 'You can insert it again, or adjust the selected messages first.',
+      'preview.summaryRatio': 'Summary is {percent}% of the transcript',
+      'summary.background': 'Background',
+      'summary.goal': 'Goal',
+      'summary.constraints': 'Constraints',
+      'summary.decisions': 'Key decisions',
+      'summary.todos': 'Next steps',
+      'summary.acceptance': 'Acceptance criteria',
+      'summary.none': '(not stated in the conversation)',
+      'summary.truncated': 'Note: the summary was compressed; see DeepSeek for full detail.',
+      'handoff.summaryHeading': '## Structured handoff',
+      'handoff.conclusionHeading': '## Conclusion',
+      'handoff.directiveHeading': '## Task instruction',
+      'handoff.copyOnly': 'Copy only, do not insert',
+      'history.title': 'Handoff history',
+      'history.empty': 'No handoffs yet.',
+      'history.clear': 'Clear history',
+      'history.clearConfirm': 'Clear all handoff history?',
+      'history.copy': 'Copy',
+      'history.reuse': 'Hand off again',
+      'history.delete': 'Delete',
+      'history.target': 'Target',
+      'history.meta': '{format} · {chars} chars · {tokens} tokens',
+      'history.copied': 'History item copied',
+      'history.cleared': 'Handoff history cleared',
+      'reverse.title': 'Bring Harness context to DeepSeek',
+      'reverse.desc': 'Fill the DeepSeek composer with the current conversation, selected text or an error. Nothing is sent automatically.',
+      'reverse.session': 'Current conversation',
+      'reverse.selection': 'Harness selection',
+      'reverse.extra': 'Notes / error',
+      'reverse.extraPlaceholder': 'For example: this code fails with …; help me find the cause.',
+      'reverse.fill': 'Fill the DeepSeek composer',
+      'reverse.filled': 'Filled the DeepSeek composer. Review it before sending.',
+      'reverse.noSelection': '(no Harness selection captured)',
+      'reverse.noSession': '(no open Harness conversation)',
+      'reverse.failed': 'Could not fill the composer. Sign in and open a DeepSeek conversation first.',
+      'settings.title': 'DeepSeek Chat settings',
+      'settings.close': 'Close',
+      'settings.defaultMode': 'Default handoff scope',
+      'settings.defaultFormat': 'Default handoff format',
+      'settings.longThreshold': 'Long-content threshold (chars)',
+      'settings.safety': 'Mark handoffs as external material by default',
+      'settings.return': 'Return to Harness after inserting',
+      'settings.notify': 'Notify when DeepSeek finishes a reply',
+      'settings.dedupe': 'Warn about repeated handoffs',
+      'settings.idle': 'Release the page when idle',
+      'settings.idleOff': 'Never',
+      'settings.idleHint': 'After release, opening the panel requires signing in to DeepSeek again.',
+      'settings.autoSend': 'Allow "Insert & send" in the preview',
+      'settings.autoSendHint': 'When off, handoffs are always inserted as drafts and you send manually.',
+      'settings.stats': 'Local stats',
+      'settings.statsBody': '{open} opens · {preview} handoffs · {ok} succeeded · {failed} failed · {undo} undo',
+      'settings.copyStats': 'Copy stats',
+      'settings.copyDiagnostics': 'Copy diagnostics',
+      'settings.clearHistory': 'Clear handoff history',
+      'settings.reset': 'Reset to defaults',
+      'settings.resetDone': 'Settings reset to defaults',
+      'settings.saved': 'Settings saved',
+      'health.banner': 'The page structure may have changed; handoff could fail.',
+      'health.detail': 'You appear to be signed in, but no writable composer or message nodes were found.',
+      'health.copy': 'Copy diagnostics',
+      'health.dismiss': 'Dismiss',
+      'health.ok': 'Page self-check passed',
+      'health.failed': 'Page self-check failed: {detail}',
+      'health.diagnosticsCopied': 'Diagnostics copied (no conversation content)',
+      'notify.doneTitle': 'DeepSeek finished a reply',
+      'notify.doneBody': '{title}: {preview}',
+      'notify.denied': 'System notifications are blocked; the unread badge still works',
+      'notify.inPanel': 'DeepSeek replied',
+      'toast.exported': 'Exported {name}',
+      'toast.sendFailed': 'Inserted, but auto-send failed. Send it manually from the composer.',
+      'toast.sent': 'Inserted and sent',
+      'toast.noDiagnostics': 'No page diagnostics are available yet',
+      'template.implement.directive': 'Implement the discussion above. Give a one-line plan, change the code, and explain how to verify it.',
+      'template.planFirst.directive': 'Give an implementation plan first (steps, files, risks, verification). Do not change code yet.',
+      'template.review.directive': 'Review the requirements or plan above. Point out problems, risks and gaps, then suggest improvements.',
+      'template.goal.directive': 'Advance this task based on the DeepSeek discussion below.',
+      'template.planCommand.directive': 'Create a plan based on the DeepSeek discussion below.',
+      'scenario.title': 'Scenario templates',
+      'scenario.review': 'Requirement review',
+      'scenario.review.prompt':
+        'Review the requirement below: what problem does it solve, who is the user, what assumptions does it make, and what are the edge cases and risks? List the questions that must be clarified.',
+      'scenario.compare': 'Compare options',
+      'scenario.compare.prompt':
+        'Compare the options below across benefit, cost, risk, maintainability and migration cost. End with a recommendation and the conditions where it applies.',
+      'scenario.code': 'Code review',
+      'scenario.code.prompt':
+        'Review the code below: correctness and security first, then edge cases, performance and readability. Sort findings by severity and give concrete fixes.',
+      'scenario.paper': 'Paper deep-read',
+      'scenario.paper.prompt':
+        'Deep-read the material below: summarize the contribution in one sentence, then cover method, experiments, conclusions and limitations, and explain the key formulas or terms.',
+      'scenario.copy': 'Copywriting',
+      'scenario.copy.prompt':
+        'Write three versions of copy for the product below: for new users, hesitant users and existing users. Each version needs a headline, one-line value proposition and call to action.',
     };
 
     const CSS = `
@@ -487,6 +934,11 @@ window.__ModuleLoader__.load({
   cursor: pointer;
 }
 .dsh-dsc-menu-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dsc-menu-sep {
+  height: 0.5px;
+  margin: 4px 6px;
+  background: var(--dsw-alias-border-l3);
+}
 .dsh-dsc-menu-check {
   width: 14px;
   flex: none;
@@ -841,11 +1293,231 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   font-size: 11.5px;
   line-height: 1.5;
 }
+.dsh-dsc-sidebar-glyph {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+.dsh-dsc-badge {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  box-shadow: 0 0 0 1.5px var(--dsw-alias-bg-layer-1);
+}
+.dsh-dsc-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+  background: color-mix(in srgb, #d9a441 12%, var(--dsw-alias-bg-base));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.dsh-dsc-banner-copy { flex: 1 1 auto; min-width: 0; }
+.dsh-dsc-banner-actions { display: flex; align-items: center; gap: 4px; }
+.dsh-dsc-banner button {
+  height: 22px;
+  padding: 0 7px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dsh-dsc-chip[data-active='true'] {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-dsc-preview-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+.dsh-dsc-preview-line > span:first-child {
+  min-width: 70px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dsc-dedupe {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 0.5px solid color-mix(in srgb, #d9a441 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, #d9a441 10%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.dsh-dsc-dedupe strong { color: var(--dsw-alias-label-primary); font-weight: 500; }
+.dsh-dsc-modal-settings {
+  width: min(580px, 100%);
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  align-items: stretch;
+}
+.dsh-dsc-modal-settings .dsh-dsc-heading { text-align: left; }
+.dsh-dsc-form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+}
+.dsh-dsc-form-row:last-of-type { border-bottom: 0; }
+.dsh-dsc-form-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.dsh-dsc-form-copy small {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.dsh-dsc-form-control { flex: none; display: flex; align-items: center; gap: 6px; }
+.dsh-dsc-number {
+  width: 96px;
+  height: 30px;
+  padding: 0 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.dsh-dsc-textarea {
+  width: 100%;
+  min-height: 96px;
+  box-sizing: border-box;
+  padding: 8px 9px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+}
+.dsh-dsc-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 380px;
+  overflow: auto;
+}
+.dsh-dsc-history-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-base);
+}
+.dsh-dsc-history-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.dsh-dsc-history-main small {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.dsh-dsc-history-actions { flex: none; display: flex; align-items: center; gap: 4px; }
+.dsh-dsc-history-actions button {
+  height: 24px;
+  padding: 0 7px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dsh-dsc-history-actions button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dsc-empty {
+  padding: 18px 10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+.dsh-dsc-subheading {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.dsh-dsc-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+}
+.dsh-dsc-footer-actions .dsh-dsc-spacer { flex: 1 1 auto; }
+.dsh-dsc-stats {
+  padding: 8px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.dsh-dsc-preview-scroll {
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+}
 @media (max-width: 720px) {
   .dsh-dsc-preview { padding: 10px; }
   .dsh-dsc-preview-card { padding: 12px; }
   .dsh-dsc-preview-role { width: 54px; }
   .dsh-dsc-preview-actions { margin-left: 0; width: 100%; justify-content: flex-end; }
+  .dsh-dsc-form-row { flex-direction: column; gap: 6px; }
 }
 `;
 
@@ -1000,21 +1672,33 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
     }
 
     function ChatGlyph({ size = 18 }) {
+      const ui = useUiSnapshot();
       return h(
-        'svg',
-        {
-          width: size,
-          height: size,
-          viewBox: '0 0 50 50',
-          fill: 'none',
-          'aria-hidden': true,
-          focusable: false,
-        },
-        h('path', {
-          d: WHALE_PATH,
-          fill: '#4D6BFE',
-          fillRule: 'nonzero',
-        }),
+        'span',
+        { className: 'dsh-dsc-sidebar-glyph' },
+        h(
+          'svg',
+          {
+            width: size,
+            height: size,
+            viewBox: '0 0 50 50',
+            fill: 'none',
+            'aria-hidden': true,
+            focusable: false,
+          },
+          h('path', {
+            d: WHALE_PATH,
+            fill: '#4D6BFE',
+            fillRule: 'nonzero',
+          }),
+        ),
+        ui.unread > 0
+          ? h(
+              'span',
+              { className: 'dsh-dsc-badge', 'aria-label': String(ui.unread) },
+              ui.unread > 9 ? '9+' : String(ui.unread),
+            )
+          : null,
       );
     }
 
@@ -1147,6 +1831,36 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       );
     }
 
+    function SettingsGlyph({ size = 15 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true, focusable: false },
+        h('circle', { cx: 12, cy: 12, r: 3, stroke: 'currentColor', strokeWidth: 1.7 }),
+        h('path', {
+          d: 'M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-4v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1Z',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      );
+    }
+
+    function HistoryGlyph({ size = 14 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true, focusable: false },
+        h('path', {
+          d: 'M4 12a8 8 0 1 0 2.4-5.7M4 4v5h5',
+          stroke: 'currentColor',
+          strokeWidth: 1.7,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+        h('path', { d: 'M12 8v4l3 2', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round' }),
+      );
+    }
+
     function IconButton({ label, onClick, children, active }) {
       return h(
         'button',
@@ -1162,15 +1876,24 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       );
     }
 
-    const HANDOFF_LIMIT = 20000;
-    const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
-
     async function extractInGuest(mode) {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      const ITEM = '[data-virtual-list-item-key]';
-      const ASSISTANT = '.ds-assistant-message-main-content';
-      const THINK = '.ds-think-content';
+      const SELECTORS = {
+        version: 1,
+        messages: ['[data-virtual-list-item-key]'],
+        assistant: ['.ds-assistant-message-main-content'],
+        think: ['.ds-think-content'],
+      };
+      const pickSelector = (list) => {
+        for (const selector of list) {
+          if (document.querySelector(selector) !== null) return selector;
+        }
+        return list[0];
+      };
+      const ITEM = pickSelector(SELECTORS.messages);
+      const ASSISTANT = pickSelector(SELECTORS.assistant);
+      const THINK = pickSelector(SELECTORS.think);
       const BLOCKS = new Set([
         'P', 'DIV', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'UL', 'OL', 'LI',
         'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE', 'TABLE', 'TR', 'HR',
@@ -1375,15 +2098,160 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       );
     }
 
+    function splitSummaryLines(text) {
+      return String(text || '')
+        .split(/\n+/)
+        .map((line) =>
+          line
+            .replace(/^\s{0,6}(?:[-*+>]|\d+[.)])\s+/, '')
+            .replace(/^#{1,6}\s+/, '')
+            .replace(/\s+/g, ' ')
+            .trim(),
+        )
+        .filter((line) => line.length >= 4);
+    }
+
+    function pickSummaryLines(messages, roles, pattern, limit, maxLength) {
+      const picked = [];
+      const seen = new Set();
+      for (const message of messages) {
+        if (!roles.includes(message.role)) continue;
+        for (const line of splitSummaryLines(message.text)) {
+          if (line.length > maxLength) continue;
+          if (!pattern.test(line)) continue;
+          const key = line.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          picked.push(line);
+          if (picked.length >= limit) return picked;
+        }
+      }
+      return picked;
+    }
+
+    function firstParagraphs(text, count, maxLength) {
+      return String(text || '')
+        .split(/\n{2,}/)
+        .map((paragraph) => paragraph.replace(/\s+/g, ' ').trim())
+        .filter((paragraph) => paragraph.length > 0)
+        .slice(0, count)
+        .map((paragraph) => (paragraph.length > maxLength ? paragraph.slice(0, maxLength) + '…' : paragraph));
+    }
+
+    function buildStructuredSummary(messages, t) {
+      const userMessages = messages.filter((message) => message.role === 'user');
+      const assistantMessages = messages.filter((message) => message.role === 'assistant');
+      const bullet = (lines) =>
+        lines.length === 0 ? '- ' + t('summary.none') : lines.map((line) => '- ' + line).join('\n');
+      const background = [];
+      if (userMessages[0] !== undefined) {
+        background.push(...firstParagraphs(userMessages[0].text, 2, 360));
+      }
+      const goals = pickSummaryLines(
+        messages,
+        ['user'],
+        /目标|需求|想要|希望|需要|实现|做一个|改成|解决|期待|goal|need|want|implement|build|fix/i,
+        5,
+        220,
+      );
+      if (goals.length === 0 && userMessages.length > 0) {
+        goals.push(...firstParagraphs(userMessages[userMessages.length - 1].text, 1, 260));
+      }
+      const constraints = pickSummaryLines(
+        messages,
+        ['user'],
+        /约束|限制|不能|不要|必须|只能|兼容|保持|避免|要求|禁止|预算|时间|constraint|must|must not|should not|only|compatible|avoid|deadline/i,
+        6,
+        220,
+      );
+      const decisions = pickSummaryLines(
+        messages,
+        ['assistant'],
+        /建议|方案|结论|推荐|采用|选择|思路|做法|可以|应该|最佳|权衡|recommend|suggest|conclusion|approach|choose|trade-?off|should/i,
+        6,
+        240,
+      );
+      if (decisions.length === 0 && assistantMessages.length > 0) {
+        decisions.push(...firstParagraphs(assistantMessages[assistantMessages.length - 1].text, 2, 320));
+      }
+      const todos = pickSummaryLines(
+        messages,
+        ['user', 'assistant'],
+        /待办|下一步|接下来|后续|需要做|先.{0,8}再|TODO|next step|follow[- ]?up|to-?do|then /i,
+        6,
+        220,
+      );
+      const acceptance = pickSummaryLines(
+        messages,
+        ['user', 'assistant'],
+        /验收|完成标准|测试|通过|验证|检查|确保|acceptance|verify|test|done when|criteria|ensure/i,
+        6,
+        240,
+      );
+      return [
+        '### ' + t('summary.background'),
+        '',
+        bullet(background),
+        '',
+        '### ' + t('summary.goal'),
+        '',
+        bullet(goals),
+        '',
+        '### ' + t('summary.constraints'),
+        '',
+        bullet(constraints),
+        '',
+        '### ' + t('summary.decisions'),
+        '',
+        bullet(decisions),
+        '',
+        '### ' + t('summary.todos'),
+        '',
+        bullet(todos),
+        '',
+        '### ' + t('summary.acceptance'),
+        '',
+        bullet(acceptance),
+      ].join('\n');
+    }
+
+    function limitStructuredSummary(summary, originalLength, t) {
+      const limit = Math.max(600, Math.floor(Math.max(1, originalLength) * 0.4));
+      if (summary.length <= limit) return summary;
+      const cut = summary.slice(0, limit);
+      const boundary = Math.max(cut.lastIndexOf('\n'), cut.lastIndexOf(' '));
+      return (boundary > limit * 0.6 ? cut.slice(0, boundary) : cut).trimEnd() + '\n\n' + t('summary.truncated');
+    }
+
+    function conclusionOf(messages) {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        if (messages[index].role === 'assistant' && String(messages[index].text || '').trim() !== '') {
+          return String(messages[index].text).trim();
+        }
+      }
+      return messages.length === 0 ? '' : String(messages[messages.length - 1].text || '').trim();
+    }
+
     function formatHandoff(messages, mode, truncated, t, options) {
-      const safety = options !== undefined && options.safety === true;
+      const config = options !== null && typeof options === 'object' ? options : {};
+      const safety = config.safety === true;
+      const format = HANDOFF_FORMATS.includes(config.format) ? config.format : 'raw';
+      const template = HANDOFF_TEMPLATES.includes(config.template) ? config.template : 'none';
+      const directive = templateDirective(template, t);
+      const isCommand = template === 'goal' || template === 'planCommand';
       const lines = [];
       if (safety) lines.push(t('handoff.safetyHeader'), t('handoff.safetyNote'), '');
       else lines.push(t('handoff.header'));
       lines.push(t('handoff.meta', { time: formatStamp(new Date()), scope: t('handoff.menu.' + mode) }));
       if (truncated) lines.push(t('handoff.truncatedNote'));
       lines.push('');
-      if (mode === 'selection') {
+      if (format === 'summary') {
+        const originalLength = messages.reduce((sum, message) => sum + String(message.text || '').length, 0);
+        lines.push(t('handoff.summaryHeading'), '');
+        lines.push(limitStructuredSummary(buildStructuredSummary(messages, t), originalLength, t));
+      } else if (format === 'conclusion') {
+        lines.push(t('handoff.conclusionHeading'), '', conclusionOf(messages));
+      } else if (mode === 'selection') {
         lines.push(t('handoff.selectionHeading'), '', messages[0] === undefined ? '' : messages[0].text);
       } else {
         lines.push(t('handoff.recordHeading'), '');
@@ -1396,9 +2264,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           );
         }
       }
+      if (directive !== '' && !isCommand) lines.push('', t('handoff.directiveHeading'), '', directive);
       const body = lines.join('\n').trim() + '\n';
-      if (!safety) return body;
-      return '<' + SAFETY_TAG + '>\n' + body + '</' + SAFETY_TAG + '>\n';
+      const wrapped = safety ? '<' + SAFETY_TAG + '>\n' + body + '</' + SAFETY_TAG + '>\n' : body;
+      const commandPrefix = isCommand ? '/' + (template === 'goal' ? 'goal' : 'plan') + ' ' + directive + '\n\n' : '';
+      return commandPrefix + wrapped;
     }
 
     async function copyText(text) {
@@ -1425,6 +2295,205 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         console.warn('DeepSeek chat: clipboard fallback failed', error);
         return false;
       }
+    }
+
+    function downloadText(name, text) {
+      try {
+        const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = name;
+        anchor.style.display = 'none';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return true;
+      } catch (error) {
+        console.warn('DeepSeek chat: export failed', error);
+        return false;
+      }
+    }
+
+    function probePageInGuest() {
+      const SELECTORS = {
+        version: 1,
+        messages: ['[data-virtual-list-item-key]'],
+        assistant: ['.ds-assistant-message-main-content'],
+        composer: ['textarea', '[contenteditable="true"]'],
+      };
+      const pickSelector = (list) => {
+        for (const selector of list) {
+          if (document.querySelector(selector) !== null) return selector;
+        }
+        return list[0];
+      };
+      const messageSelector = pickSelector(SELECTORS.messages);
+      const assistantSelector = pickSelector(SELECTORS.assistant);
+      const composer = document.querySelector(SELECTORS.composer[0]) || document.querySelector(SELECTORS.composer[1]);
+      const items = document.querySelectorAll(messageSelector);
+      const assistants = document.querySelectorAll(assistantSelector);
+      const body = document.body;
+      const text =
+        body !== null && body !== undefined && typeof body.innerText === 'string' ? body.innerText.slice(0, 4000) : '';
+      const auth = composer !== null ? 'in' : /登录|登入|Log in|Sign in|手机号|邮箱|Email|Phone/i.test(text) ? 'out' : 'unknown';
+      const title = typeof document.title === 'string' ? document.title : '';
+      return {
+        ok: composer !== null,
+        auth,
+        title: title.slice(0, 120),
+        url: typeof location !== 'undefined' && typeof location.href === 'string' ? location.href : '',
+        count: items.length,
+        assistants: assistants.length,
+        selectorVersion: SELECTORS.version,
+        selectors: {
+          messages: items.length > 0,
+          assistant: assistants.length > 0,
+          composer: composer !== null,
+        },
+        time: Date.now(),
+      };
+    }
+
+    async function probePage(view) {
+      if (view === null || view === undefined || typeof view.executeJavaScript !== 'function') return null;
+      let timer = 0;
+      try {
+        const result = await Promise.race([
+          view.executeJavaScript('(' + probePageInGuest.toString() + ')()', true),
+          new Promise((resolve) => {
+            timer = window.setTimeout(() => resolve(null), 5000);
+          }),
+        ]);
+        return result !== null && typeof result === 'object' ? result : null;
+      } catch (error) {
+        return null;
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+
+    function buildDiagnostics(page, extra) {
+      const payload = {
+        plugin: '@local/dsh-deepseek-web-chat',
+        version: PLUGIN_VERSION,
+        selectorVersion:
+          page !== null && typeof page === 'object' && Number.isFinite(page.selectorVersion)
+            ? page.selectorVersion
+            : SELECTOR_VERSION,
+        time: new Date().toISOString(),
+        stage: extra !== null && typeof extra === 'object' && typeof extra.stage === 'string' ? extra.stage : 'manual',
+        auth: page !== null && typeof page === 'object' ? page.auth : 'unknown',
+        url: page !== null && typeof page === 'object' ? page.url : '',
+        titleLength: page !== null && typeof page === 'object' && typeof page.title === 'string' ? page.title.length : 0,
+        selectors: page !== null && typeof page === 'object' ? page.selectors : null,
+        counts: page !== null && typeof page === 'object' ? { messages: page.count, assistants: page.assistants } : null,
+        settings: (() => {
+          const settings = loadSettings();
+          return {
+            defaultMode: settings.defaultMode,
+            defaultFormat: settings.defaultFormat,
+            safety: settings.safety,
+            notify: settings.notify,
+            idleMinutes: settings.idleMinutes,
+          };
+        })(),
+        metrics: loadMetrics().counts,
+        note: 'No conversation content, file paths or account information is included.',
+      };
+      return JSON.stringify(payload, null, 2);
+    }
+
+    function observeCompletionInGuest() {
+      if (window.__DSH_DSC_OBSERVER__ === true) return true;
+      window.__DSH_DSC_OBSERVER__ = true;
+      let lastText = '';
+      let lastChange = Date.now();
+      let notified = '';
+      let lastTitle = '';
+      const assistantSelectors = ['.ds-assistant-message-main-content'];
+      const assistantSelector =
+        assistantSelectors.find((selector) => document.querySelector(selector) !== null) || assistantSelectors[0];
+      const read = () => {
+        const nodes = document.querySelectorAll(assistantSelector);
+        const last = nodes[nodes.length - 1];
+        return last !== undefined && last !== null ? String(last.innerText || '') : '';
+      };
+      const sendTitle = () => {
+        const title = String(document.title || '');
+        if (title === lastTitle) return;
+        lastTitle = title;
+        try {
+          console.log('__DSH_DSC_TITLE__' + JSON.stringify({ title: title.slice(0, 160) }));
+        } catch (error) {
+          /* Title reporting is best effort. */
+        }
+      };
+      const initial = read();
+      lastText = initial;
+      notified = initial;
+      sendTitle();
+      window.setInterval(() => {
+        const text = read();
+        const now = Date.now();
+        if (text !== lastText) {
+          lastText = text;
+          lastChange = now;
+          sendTitle();
+          return;
+        }
+        if (text.length > 0 && text !== notified && now - lastChange > 2500) {
+          notified = text;
+          sendTitle();
+          try {
+            console.log(
+              '__DSH_DSC_DONE__' +
+                JSON.stringify({ title: String(document.title || '').slice(0, 160), preview: text.slice(0, 140) }),
+            );
+          } catch (error) {
+            /* Completion reporting is best effort. */
+          }
+        }
+      }, 1200);
+      return true;
+    }
+
+    function fillComposerInGuest(text) {
+      const value = String(text || '');
+      const field = document.querySelector('textarea');
+      if (field !== null) {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+          if (descriptor !== undefined && typeof descriptor.set === 'function') descriptor.set.call(field, value);
+          else field.value = value;
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+          field.focus();
+          return { ok: true, kind: 'textarea' };
+        } catch (error) {
+          return { ok: false, reason: 'textarea' };
+        }
+      }
+      const editable = document.querySelector('[contenteditable="true"]');
+      if (editable !== null) {
+        try {
+          editable.focus();
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(editable);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          const inserted = document.execCommand('insertText', false, value);
+          if (!inserted) {
+            editable.textContent = value;
+            editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+          }
+          return { ok: true, kind: 'editable' };
+        } catch (error) {
+          return { ok: false, reason: 'editable' };
+        }
+      }
+      return { ok: false, reason: 'no-composer' };
     }
 
     function createHandoffDelivery(ctx) {
@@ -1498,6 +2567,27 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             return true;
           } catch (error) {
             console.warn('DeepSeek chat: could not notify the composer', error);
+            return false;
+          }
+        },
+        submit(sessionId, expected) {
+          const target =
+            sessionId === undefined || sessionId === null || sessionId === ''
+              ? currentSessionId(ctx)
+              : sessionId;
+          if (target === undefined || target === null || target === '') return false;
+          const shell = shellFor(target);
+          if (shell === null || shell.actions === undefined || typeof shell.actions.submit !== 'function') return false;
+          try {
+            if (typeof expected === 'string' && expected !== '') {
+              const current = draftOf(shell);
+              const probe = expected.slice(0, 40);
+              if (current === undefined || current.indexOf(probe) === -1) return false;
+            }
+            shell.actions.submit();
+            return true;
+          } catch (error) {
+            console.warn('DeepSeek chat: handoff submit failed', error);
             return false;
           }
         },
@@ -1599,18 +2689,34 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [reloadConfirm, setReloadConfirm] = React.useState(false);
       const [authState, setAuthState] = React.useState('unknown');
       const [onboarding, setOnboarding] = React.useState(() => shouldShowOnboarding());
+      const [settings, setSettings] = React.useState(() => loadSettings());
+      const [settingsOpen, setSettingsOpen] = React.useState(false);
+      const [historyOpen, setHistoryOpen] = React.useState(false);
+      const [history, setHistory] = React.useState(() => loadHistory());
+      const [reverseOpen, setReverseOpen] = React.useState(false);
+      const [reverseText, setReverseText] = React.useState('');
+      const [health, setHealth] = React.useState(null);
+      const [healthDismissed, setHealthDismissed] = React.useState(false);
       const hostRef = React.useRef(null);
+      const panelRootRef = React.useRef(null);
       const viewRef = React.useRef(null);
       const handoffRef = React.useRef(null);
       const tRef = React.useRef(t);
       const phaseRef = React.useRef(phase);
+      const settingsRef = React.useRef(settings);
       const crashRecoveredRef = React.useRef(false);
       const autoHandoffRef = React.useRef(false);
       const runHandoffRef = React.useRef(null);
       const toggleRef = React.useRef(null);
       const requestHandoffRef = React.useRef(null);
+      const openRef = React.useRef(null);
+      const handleReplyDoneRef = React.useRef(null);
+      const handleTitleRef = React.useRef(null);
+      const lastSelectionRef = React.useRef('');
       const previousActiveRef = React.useRef(active);
       const visible = opened && (active || docked);
+      const visibleRef = React.useRef(visible);
+      const ui = useUiSnapshot();
 
       React.useEffect(() => {
         tRef.current = t;
@@ -1619,6 +2725,50 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       React.useEffect(() => {
         phaseRef.current = phase;
       }, [phase]);
+
+      React.useEffect(() => {
+        settingsRef.current = settings;
+      }, [settings]);
+
+      React.useEffect(() => {
+        visibleRef.current = visible;
+      }, [visible]);
+
+      React.useEffect(() => {
+        if (!visible) return;
+        setUnread(0);
+        track('dsc_open', { source: docked ? 'dock' : active ? 'icon' : 'panel' });
+      }, [visible, docked, active]);
+
+      React.useEffect(() => {
+        const onSelectionChange = () => {
+          try {
+            const selection = window.getSelection();
+            if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) return;
+            const text = selection.toString().trim();
+            if (text === '') return;
+            const anchor = selection.anchorNode;
+            const element = anchor === null ? null : anchor.nodeType === 1 ? anchor : anchor.parentElement;
+            if (element !== null && typeof element.closest === 'function' && element.closest('.dsh-dsc-panel') !== null) return;
+            lastSelectionRef.current = text.slice(0, 12000);
+          } catch (error) {
+            /* Selection capture is best effort. */
+          }
+        };
+        document.addEventListener('selectionchange', onSelectionChange);
+        return () => document.removeEventListener('selectionchange', onSelectionChange);
+      }, []);
+
+      React.useEffect(() => {
+        if (settings.idleMinutes <= 0 || visible || !opened) return undefined;
+        const timer = window.setTimeout(() => {
+          setOpened(false);
+          setPhase('loading');
+          setAttempt((value) => value + 1);
+          setToast({ text: tRef.current('settings.idleHint'), actions: [] });
+        }, settings.idleMinutes * 60000);
+        return () => window.clearTimeout(timer);
+      }, [settings.idleMinutes, visible, opened]);
 
       React.useLayoutEffect(() => {
         if (active && rect !== null && rect.width > 0 && rect.height > 0 && !opened) setOpened(true);
@@ -1645,6 +2795,71 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             : [actions];
         setToast({ text, actions: list });
       }, []);
+
+      const updateSetting = React.useCallback((key, value) => {
+        const next = { ...settingsRef.current, [key]: value };
+        settingsRef.current = next;
+        setSettings(next);
+        saveSettings(next);
+        track('dsc_settings', {});
+      }, []);
+
+      const requestNotifyPermission = React.useCallback(() => {
+        try {
+          if (typeof Notification === 'undefined') return;
+          if (Notification.permission === 'default') void Notification.requestPermission();
+        } catch (error) {
+          /* Notification permission is best effort. */
+        }
+      }, []);
+
+      const showSystemNotification = React.useCallback((payload) => {
+        if (settingsRef.current.notify !== true) return;
+        try {
+          if (typeof Notification === 'undefined') return;
+          if (Notification.permission !== 'granted') {
+            if (Notification.permission === 'default') void Notification.requestPermission();
+            return;
+          }
+          const title = tRef.current('notify.doneTitle');
+          const body = tRef.current('notify.doneBody', {
+            title: payload.title === '' ? tRef.current('web.title') : payload.title,
+            preview: payload.preview,
+          });
+          const notification = new Notification(title, { body, silent: false });
+          notification.onclick = () => {
+            try {
+              window.focus();
+            } catch (error) {
+              /* Focusing the window is best effort. */
+            }
+            openRef.current?.();
+            setUnread(0);
+            notification.close();
+          };
+          track('dsc_notify', {});
+        } catch (error) {
+          console.warn('DeepSeek chat: could not show a notification', error);
+        }
+      }, []);
+
+      handleReplyDoneRef.current = (payload) => {
+        if (payload === null || typeof payload !== 'object') return;
+        const visibleNow = visibleRef.current && !document.hidden;
+        if (visibleNow) {
+          showToast(tRef.current('notify.inPanel'));
+          return;
+        }
+        bumpUnread();
+        showSystemNotification(payload);
+      };
+
+      handleTitleRef.current = (title) => {
+        const clean = String(title || '')
+          .replace(/\s*[-–|]\s*DeepSeek(?:\s*Web)?\s*$/i, '')
+          .trim();
+        if (clean !== '') setPanelTitle(clean);
+      };
 
       const handoffErrorText = React.useCallback(
         (reason) => {
@@ -1740,6 +2955,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const commitHandoff = React.useCallback(
         async (payload) => {
           setPreview(null);
+          const tokens = estimateTokens(payload.text);
+          const format = HANDOFF_FORMATS.includes(payload.format) ? payload.format : 'raw';
+          const template = HANDOFF_TEMPLATES.includes(payload.template) ? payload.template : 'none';
+          const hash =
+            typeof payload.hash === 'string'
+              ? payload.hash
+              : handoffHash(Array.isArray(payload.messages) ? payload.messages : [], format, template);
           let delivered = { ok: false, reason: 'failed' };
           if (delivery !== null && delivery !== undefined && typeof delivery.deliver === 'function') {
             try {
@@ -1748,16 +2970,66 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               console.warn('DeepSeek chat: handoff delivery failed', cause);
             }
           }
+          track('dsc_handoff_commit', {
+            format,
+            template,
+            messages: payload.count,
+            chars: payload.chars,
+            tokens,
+            truncated: payload.truncated === true,
+          });
+          if (template !== 'none') track('dsc_template_use', {});
           if (delivered !== null && delivered.ok === true) {
-            const tokens = estimateTokens(payload.text);
+            track('dsc_handoff_result', { ok: true });
+            track('dsc_handoff_ok', {});
+            setHistory(
+              recordHandoffHistory({
+                hash,
+                format,
+                template,
+                messages: payload.messages,
+                chars: payload.chars,
+                tokens,
+                targetTitle: payload.targetTitle,
+                text: payload.text,
+              }),
+            );
+            const sendNow = payload.autoSend === true;
+            const reveal = () => {
+              if (docked) setDocked(false);
+              if (delivery !== null && delivery !== undefined && typeof delivery.reveal === 'function') {
+                return delivery.reveal(delivered.sessionId) === true;
+              }
+              return false;
+            };
+            if (sendNow) {
+              const send = () => {
+                const sent =
+                  delivery !== null && delivery !== undefined && typeof delivery.submit === 'function'
+                    ? delivery.submit(delivered.sessionId, payload.text)
+                    : false;
+                showToast(sent ? t('toast.sent') : t('toast.sendFailed'), [{ label: t('back'), onClick: back }]);
+              };
+              if (payload.returnToHarness === true) {
+                if (reveal()) {
+                  const sessionId = delivered.sessionId;
+                  window.setTimeout(() => {
+                    if (typeof delivery.focus === 'function') delivery.focus(sessionId);
+                    send();
+                  }, 350);
+                  return;
+                }
+              }
+              window.setTimeout(send, 350);
+              return;
+            }
             if (
               payload.returnToHarness === true &&
               delivery !== null &&
               delivery !== undefined &&
               typeof delivery.reveal === 'function'
             ) {
-              if (docked) setDocked(false);
-              if (delivery.reveal(delivered.sessionId) === true) {
+              if (reveal()) {
                 const sessionId = delivered.sessionId;
                 const noticeText = t('handoff.returned', { count: payload.count, chars: payload.chars });
                 window.setTimeout(() => {
@@ -1776,6 +3048,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     delivery !== null && delivery !== undefined && typeof delivery.restore === 'function'
                       ? delivery.restore(delivered.sessionId, delivered.before)
                       : false;
+                  track('dsc_undo', {});
                   showToast(restored ? t('handoff.undone') : t('handoff.error.failed'));
                 },
               });
@@ -1787,6 +3060,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             );
             return;
           }
+          track('dsc_handoff_result', { ok: false });
+          track('dsc_handoff_failed', {});
           const copied = await copyText(payload.text);
           const reason = handoffErrorText(delivered === null ? 'failed' : delivered.reason);
           showToast(copied ? reason + ' · ' + t('handoff.copied') : reason);
@@ -1808,6 +3083,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             showToast(handoffErrorText('unsupported'));
             return;
           }
+          const startedAt = Date.now();
           setBusy(true);
           setProgress(0);
           setElapsed(0);
@@ -1817,11 +3093,16 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             const result = await Promise.race([
               view.executeJavaScript(source, true),
               new Promise((resolve, reject) => {
-                timer = window.setTimeout(() => reject(new Error('handoff-timeout')), 30000);
+                timer = window.setTimeout(() => reject(new Error('handoff-timeout')), 45000);
               }),
             ]);
             if (result === undefined || result === null) throw new Error('handoff-empty');
             if (result.ok !== true) {
+              void probePage(view).then((page) => {
+                if (page === null) return;
+                setHealth({ ...page, ok: false });
+                setHealthDismissed(false);
+              });
               showToast(handoffErrorText(result.reason || 'failed'));
               return;
             }
@@ -1836,6 +3117,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 ? delivery.currentSessionId()
                 : undefined;
             const targetSessionId = targets.length > 0 ? targets[0].id : current;
+            const defaults = settingsRef.current;
+            setHistory(loadHistory());
             setPreview({
               mode,
               truncated: result.truncated === true,
@@ -1847,12 +3130,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               })),
               targets,
               targetSessionId: targetSessionId === undefined || targetSessionId === null ? '' : targetSessionId,
-              safety: true,
+              format: defaults.defaultFormat,
+              template: 'none',
+              safety: defaults.safety,
               showText: false,
-              returnToHarness: true,
+              returnToHarness: defaults.returnToHarness,
+              autoSend: defaults.autoSend,
             });
+            track('dsc_handoff_preview', { duration_ms: Math.max(0, Date.now() - startedAt) });
           } catch (cause) {
             const reason = cause instanceof Error && cause.message === 'handoff-timeout' ? 'timeout' : 'failed';
+            track('dsc_error', {});
+            void probePage(view).then((page) => {
+              if (page === null) return;
+              setHealth({ ...page, ok: false });
+              setHealthDismissed(false);
+            });
             showToast(handoffErrorText(reason));
           } finally {
             window.clearTimeout(timer);
@@ -1876,6 +3169,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       runHandoffRef.current = runHandoff;
       toggleRef.current = toggle;
       requestHandoffRef.current = requestHandoff;
+      openRef.current = open;
 
       React.useEffect(() => {
         if (!visible) return undefined;
@@ -1911,6 +3205,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             dismissOnboarding();
             return;
           }
+          if (settingsOpen) {
+            setSettingsOpen(false);
+            return;
+          }
+          if (historyOpen) {
+            setHistoryOpen(false);
+            return;
+          }
+          if (reverseOpen) {
+            setReverseOpen(false);
+            return;
+          }
           if (toast !== null) {
             setToast(null);
             return;
@@ -1923,7 +3229,20 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-      }, [visible, back, menuOpen, preview, reloadConfirm, onboarding, dismissOnboarding, toast, docked]);
+      }, [
+        visible,
+        back,
+        menuOpen,
+        preview,
+        reloadConfirm,
+        onboarding,
+        dismissOnboarding,
+        settingsOpen,
+        historyOpen,
+        reverseOpen,
+        toast,
+        docked,
+      ]);
 
       React.useEffect(() => {
         if (!menuOpen) return undefined;
@@ -2056,6 +3375,26 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           window.clearTimeout(loadTimer);
           setError('');
           setPhase('ready');
+          const target = element;
+          window.setTimeout(() => {
+            if (disposed || target === null) return;
+            void probePage(target).then((page) => {
+              if (disposed || page === null) return;
+              setAuthState(page.auth === 'in' || page.auth === 'out' ? page.auth : 'unknown');
+              setHealth(page);
+            });
+          }, 1800);
+          window.setTimeout(() => {
+            if (disposed || target === null) return;
+            try {
+              const loading = target.executeJavaScript('(' + observeCompletionInGuest.toString() + ')()', false);
+              if (loading !== undefined && typeof loading.catch === 'function') {
+                loading.catch(() => {});
+              }
+            } catch (error) {
+              /* Completion observation is best effort. */
+            }
+          }, 1200);
         };
 
         const onRenderProcessGone = () => {
@@ -2078,6 +3417,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           const message = event !== null && event !== undefined && typeof event.message === 'string' ? event.message : '';
           const match = message.match(/__DSH_DSC_PROGRESS__(\d+)/);
           if (match !== null) setProgress(Number(match[1]));
+          if (message.startsWith('__DSH_DSC_DONE__')) {
+            try {
+              const payload = JSON.parse(message.slice('__DSH_DSC_DONE__'.length));
+              handleReplyDoneRef.current?.(payload);
+            } catch (error) {
+              /* Malformed completion messages are ignored. */
+            }
+          }
+          if (message.startsWith('__DSH_DSC_TITLE__')) {
+            try {
+              const payload = JSON.parse(message.slice('__DSH_DSC_TITLE__'.length));
+              handleTitleRef.current?.(payload.title);
+            } catch (error) {
+              /* Malformed title messages are ignored. */
+            }
+          }
         };
 
         attachTimer = window.setTimeout(() => {
@@ -2191,12 +3546,25 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }, []);
 
       const previewSelected = preview === null ? [] : preview.messages.filter((message) => message.selected);
+      const previewFormat = preview === null || !HANDOFF_FORMATS.includes(preview.format) ? 'raw' : preview.format;
+      const previewTemplate =
+        preview === null || !HANDOFF_TEMPLATES.includes(preview.template) ? 'none' : preview.template;
       const previewText =
         preview === null || previewSelected.length === 0
           ? ''
-          : formatHandoff(previewSelected, preview.mode, preview.truncated, t, { safety: preview.safety });
+          : formatHandoff(previewSelected, preview.mode, preview.truncated, t, {
+              safety: preview.safety,
+              format: previewFormat,
+              template: previewTemplate,
+            });
       const previewChars = previewText.length;
       const previewTokens = previewText === '' ? 0 : estimateTokens(previewText);
+      const previewRawChars = previewSelected.reduce((sum, message) => sum + String(message.text || '').length, 0);
+      const previewHash = handoffHash(previewSelected, previewFormat, previewTemplate);
+      const dedupeMatch =
+        preview !== null && settings.dedupe ? history.find((row) => row.hash === previewHash) : undefined;
+      const previewTarget =
+        preview === null ? undefined : preview.targets.find((target) => target.id === preview.targetSessionId);
 
       const commitPreview = React.useCallback(() => {
         if (preview === null) return;
@@ -2213,9 +3581,29 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           count: previewSelected.length,
           chars: previewChars,
           targetSessionId: preview.targetSessionId,
+          targetTitle: previewTarget === undefined ? '' : previewTarget.title,
           returnToHarness: preview.returnToHarness === true,
+          autoSend: preview.autoSend === true && settings.autoSend === true,
+          format: previewFormat,
+          template: previewTemplate,
+          truncated: preview.truncated === true,
+          messages: previewSelected.map((message) => ({ role: message.role, text: message.text })),
+          hash: previewHash,
         });
-      }, [preview, previewSelected, previewText, previewChars, showToast, t, commitHandoff]);
+      }, [
+        preview,
+        previewSelected,
+        previewText,
+        previewChars,
+        previewTarget,
+        previewFormat,
+        previewTemplate,
+        previewHash,
+        settings.autoSend,
+        showToast,
+        t,
+        commitHandoff,
+      ]);
 
       const copyPreview = React.useCallback(async () => {
         if (preview === null) return;
@@ -2226,6 +3614,168 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         const copied = await copyText(previewText);
         showToast(copied ? t('handoff.copied') : t('handoff.error.failed'));
       }, [preview, previewSelected, previewText, showToast, t]);
+
+      const exportPreview = React.useCallback(() => {
+        if (preview === null || previewSelected.length === 0) {
+          showToast(t('preview.empty'));
+          return;
+        }
+        const stamp = formatStamp(new Date()).replace(/[: ]/g, '-');
+        const name = 'deepseek-handoff-' + stamp + '.md';
+        const exported = downloadText(name, previewText);
+        showToast(exported ? t('toast.exported', { name }) : t('handoff.error.failed'));
+      }, [preview, previewSelected, previewText, showToast, t]);
+
+      const openHistory = React.useCallback(() => {
+        setHistory(loadHistory());
+        setHistoryOpen(true);
+        setMenuOpen(false);
+      }, []);
+
+      const openReverse = React.useCallback(() => {
+        setMenuOpen(false);
+        const targets = typeof listTargets === 'function' ? listTargets() : [];
+        let current;
+        try {
+          current = delivery !== null && delivery !== undefined ? delivery.currentSessionId() : undefined;
+        } catch (error) {
+          current = undefined;
+        }
+        const target = targets.find((row) => row.id === current) || targets[0];
+        const title = target === undefined ? '' : target.title;
+        const selection = lastSelectionRef.current.trim();
+        const parts = [
+          t('reverse.desc'),
+          '',
+          '### ' + t('reverse.session'),
+          title === '' ? t('reverse.noSession') : title,
+          '',
+          '### ' + t('reverse.selection'),
+          selection === '' ? t('reverse.noSelection') : selection,
+        ];
+        setReverseText(parts.join('\n'));
+        setReverseOpen(true);
+      }, [delivery, listTargets, t]);
+
+      const fillReverse = React.useCallback(async () => {
+        const view = viewRef.current;
+        if (phase !== 'ready' || view === null || typeof view.executeJavaScript !== 'function') {
+          showToast(t('reverse.failed'));
+          return;
+        }
+        try {
+          const source = '(' + fillComposerInGuest.toString() + ')(' + JSON.stringify(reverseText) + ')';
+          const result = await view.executeJavaScript(source, true);
+          if (result !== null && result !== undefined && result.ok === true) {
+            setReverseOpen(false);
+            showToast(t('reverse.filled'));
+            track('dsc_reverse', { ok: true });
+            return;
+          }
+        } catch (error) {
+          console.warn('DeepSeek chat: reverse handoff failed', error);
+        }
+        track('dsc_error', {});
+        showToast(t('reverse.failed'));
+      }, [phase, reverseText, showToast, t]);
+
+      const runDiagnostics = React.useCallback(async () => {
+        setMenuOpen(false);
+        const page = await probePage(viewRef.current);
+        if (page === null || page === undefined) {
+          showToast(t('toast.noDiagnostics'));
+          return;
+        }
+        setHealth(page);
+        setHealthDismissed(false);
+        const text = buildDiagnostics(page, { stage: 'manual' });
+        const copied = await copyText(text);
+        if (page.ok === true) {
+          showToast(copied ? t('health.ok') + ' · ' + t('health.diagnosticsCopied') : t('health.ok'));
+          return;
+        }
+        const detail =
+          page.auth === 'in'
+            ? t('health.detail')
+            : t('health.banner');
+        showToast(
+          copied
+            ? t('health.failed', { detail }) + ' · ' + t('health.diagnosticsCopied')
+            : t('health.failed', { detail }),
+        );
+      }, [showToast, t]);
+
+      const copyHealthDiagnostics = React.useCallback(async () => {
+        const text = buildDiagnostics(health, { stage: 'banner' });
+        const copied = await copyText(text);
+        showToast(copied ? t('health.diagnosticsCopied') : t('handoff.error.failed'));
+      }, [health, showToast, t]);
+
+      const clearHistory = React.useCallback(() => {
+        saveHistory([]);
+        setHistory([]);
+        showToast(t('history.cleared'));
+      }, [showToast, t]);
+
+      const deleteHistory = React.useCallback((id) => {
+        setHistory((rows) => {
+          const next = rows.filter((row) => row.id !== id);
+          saveHistory(next);
+          return next;
+        });
+      }, []);
+
+      const reuseHistory = React.useCallback(
+        (row) => {
+          if (row === null || row === undefined) return;
+          const targets = typeof listTargets === 'function' ? listTargets() : [];
+          let current;
+          try {
+            current = delivery !== null && delivery !== undefined ? delivery.currentSessionId() : undefined;
+          } catch (error) {
+            current = undefined;
+          }
+          const targetSessionId = current !== undefined && current !== '' ? current : targets.length > 0 ? targets[0].id : '';
+          setHistoryOpen(false);
+          setPreview({
+            mode: 'all',
+            truncated: false,
+            messages: (Array.isArray(row.messages) ? row.messages : []).map((message, index) => ({
+              id: index,
+              role: message.role,
+              text: message.text,
+              selected: true,
+            })),
+            targets,
+            targetSessionId,
+            format: HANDOFF_FORMATS.includes(row.format) ? row.format : 'raw',
+            template: HANDOFF_TEMPLATES.includes(row.template) ? row.template : 'none',
+            safety: settingsRef.current.safety,
+            showText: false,
+            returnToHarness: settingsRef.current.returnToHarness,
+            autoSend: false,
+          });
+        },
+        [delivery, listTargets],
+      );
+
+      const copyHistory = React.useCallback(
+        async (row) => {
+          const copied = await copyText(typeof row.text === 'string' ? row.text : '');
+          showToast(copied ? t('history.copied') : t('handoff.error.failed'));
+        },
+        [showToast, t],
+      );
+
+      const exportHistory = React.useCallback(
+        (row) => {
+          const stamp = formatStamp(new Date(row.time === undefined ? Date.now() : row.time)).replace(/[: ]/g, '-');
+          const name = 'deepseek-handoff-history-' + stamp + '.md';
+          const exported = downloadText(name, typeof row.text === 'string' ? row.text : '');
+          showToast(exported ? t('toast.exported', { name }) : t('handoff.error.failed'));
+        },
+        [showToast, t],
+      );
 
       const openFromHeader = docked ? () => setDocked(false) : back;
 
@@ -2368,6 +3918,59 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                       ),
                     ),
                     h('p', { className: 'dsh-dsc-text' }, t('preview.targetHint')),
+                    h(
+                      'div',
+                      { className: 'dsh-dsc-preview-line' },
+                      h('span', null, t('preview.format')),
+                      HANDOFF_FORMATS.map((format) =>
+                        h(
+                          'button',
+                          {
+                            key: format,
+                            type: 'button',
+                            className: 'dsh-dsc-chip',
+                            'data-active': previewFormat === format ? 'true' : undefined,
+                            onClick: () =>
+                              setPreview((current) => (current === null ? current : { ...current, format })),
+                          },
+                          t('preview.format.' + format),
+                        ),
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { className: 'dsh-dsc-preview-line' },
+                      h('span', null, t('preview.template')),
+                      h(
+                        'select',
+                        {
+                          className: 'dsh-dsc-select',
+                          value: previewTemplate,
+                          onChange: (event) => {
+                            const value = event.target.value;
+                            setPreview((current) =>
+                              current === null ? current : { ...current, template: value },
+                            );
+                          },
+                        },
+                        HANDOFF_TEMPLATES.map((template) =>
+                          h('option', { key: template, value: template }, t('preview.template.' + template)),
+                        ),
+                      ),
+                    ),
+                    dedupeMatch === undefined
+                      ? null
+                      : h(
+                          'div',
+                          { className: 'dsh-dsc-dedupe' },
+                          h(
+                            'span',
+                            null,
+                            h('strong', null, t('preview.dedupe', { time: formatStamp(new Date(dedupeMatch.time)) })),
+                            h('br'),
+                            t('preview.dedupeHint'),
+                          ),
+                        ),
                   ),
                   h(IconButton, { label: t('preview.cancel'), onClick: () => setPreview(null) }, h(CloseGlyph, { size: 14 })),
                 ),
@@ -2447,6 +4050,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     }),
                     h('span', null, t('preview.return'), h('small', null, t('preview.returnHint'))),
                   ),
+                  settings.autoSend
+                    ? h(
+                        'label',
+                        { className: 'dsh-dsc-check' },
+                        h('input', {
+                          type: 'checkbox',
+                          checked: preview.autoSend === true,
+                          onChange: () =>
+                            setPreview((current) =>
+                              current === null ? current : { ...current, autoSend: !current.autoSend },
+                            ),
+                        }),
+                        h('span', null, t('preview.autoSend'), h('small', null, t('preview.autoSendHint'))),
+                      )
+                    : null,
                 ),
                 preview.showText && previewText !== ''
                   ? h('pre', { className: 'dsh-dsc-preview-final' }, previewText)
@@ -2465,13 +4083,28 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     preview.truncated
                       ? h('span', { className: 'dsh-dsc-preview-warn' }, ' · ' + t('preview.truncated'))
                       : null,
-                    previewChars > HANDOFF_LIMIT
+                    previewChars > settings.longThreshold
                       ? h('span', { className: 'dsh-dsc-preview-warn' }, ' · ' + t('preview.long'))
+                      : null,
+                    previewFormat === 'summary' && previewRawChars > 0
+                      ? h(
+                          'span',
+                          null,
+                          ' · ' +
+                            t('preview.summaryRatio', {
+                              percent: Math.round((previewChars / previewRawChars) * 100),
+                            }),
+                        )
                       : null,
                   ),
                   h(
                     'div',
                     { className: 'dsh-dsc-preview-actions' },
+                    h(
+                      'button',
+                      { type: 'button', className: 'dsh-dsc-button', onClick: exportPreview },
+                      t('preview.export'),
+                    ),
                     h('button', { type: 'button', className: 'dsh-dsc-button', onClick: () => void copyPreview() }, t('preview.copy')),
                     h('button', { type: 'button', className: 'dsh-dsc-button', onClick: () => setPreview(null) }, t('preview.cancel')),
                     h(
@@ -2482,7 +4115,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                         disabled: previewSelected.length === 0 || preview.targetSessionId === '',
                         onClick: commitPreview,
                       },
-                      preview.returnToHarness ? t('preview.insertReturn') : t('preview.insert'),
+                      preview.autoSend === true && settings.autoSend
+                        ? t('preview.send')
+                        : preview.returnToHarness
+                          ? t('preview.insertReturn')
+                          : t('preview.insert'),
                     ),
                   ),
                 ),
@@ -2523,6 +4160,295 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           )
         : null;
 
+      const metrics = loadMetrics();
+      const metric = (key) => Number(metrics.counts[key]) || 0;
+      const settingsRow = (labelKey, hintKey, control) =>
+        h(
+          'div',
+          { className: 'dsh-dsc-form-row' },
+          h('div', { className: 'dsh-dsc-form-copy' }, h('span', null, t(labelKey)), hintKey === null ? null : h('small', null, t(hintKey))),
+          h('div', { className: 'dsh-dsc-form-control' }, control),
+        );
+      const settingsCheck = (key, labelKey, hintKey) =>
+        settingsRow(
+          labelKey,
+          hintKey,
+          h('input', {
+            type: 'checkbox',
+            checked: settings[key] === true,
+            onChange: (event) => {
+              const checked = event.target.checked === true;
+              updateSetting(key, checked);
+              if (key === 'notify' && checked) requestNotifyPermission();
+            },
+          }),
+        );
+      const settingsNode = settingsOpen
+        ? h(
+            'div',
+            { className: 'dsh-dsc-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('settings.title') },
+            h(
+              'div',
+              { className: 'dsh-dsc-modal-card dsh-dsc-modal-settings' },
+              h(
+                'div',
+                { className: 'dsh-dsc-preview-head' },
+                h('div', { className: 'dsh-dsc-preview-head-copy' }, h('h2', { className: 'dsh-dsc-heading' }, t('settings.title'))),
+                h(IconButton, { label: t('settings.close'), onClick: () => setSettingsOpen(false) }, h(CloseGlyph, { size: 14 })),
+              ),
+              settingsRow(
+                'settings.defaultMode',
+                null,
+                h(
+                  'select',
+                  {
+                    className: 'dsh-dsc-select',
+                    value: settings.defaultMode,
+                    onChange: (event) => updateSetting('defaultMode', event.target.value),
+                  },
+                  HANDOFF_MODES.map((mode) => h('option', { key: mode, value: mode }, t('handoff.menu.' + mode))),
+                ),
+              ),
+              settingsRow(
+                'settings.defaultFormat',
+                null,
+                h(
+                  'select',
+                  {
+                    className: 'dsh-dsc-select',
+                    value: settings.defaultFormat,
+                    onChange: (event) => updateSetting('defaultFormat', event.target.value),
+                  },
+                  HANDOFF_FORMATS.map((format) =>
+                    h('option', { key: format, value: format }, t('preview.format.' + format)),
+                  ),
+                ),
+              ),
+              settingsRow(
+                'settings.longThreshold',
+                null,
+                h('input', {
+                  className: 'dsh-dsc-number',
+                  type: 'number',
+                  min: 1000,
+                  max: 200000,
+                  step: 1000,
+                  value: settings.longThreshold,
+                  onChange: (event) => {
+                    const value = Number(event.target.value);
+                    if (Number.isFinite(value) && value >= 1000 && value <= 200000) updateSetting('longThreshold', value);
+                  },
+                }),
+              ),
+              settingsCheck('safety', 'settings.safety', null),
+              settingsCheck('returnToHarness', 'settings.return', null),
+              settingsCheck('notify', 'settings.notify', null),
+              settingsCheck('dedupe', 'settings.dedupe', null),
+              settingsCheck('autoSend', 'settings.autoSend', 'settings.autoSendHint'),
+              settingsRow(
+                'settings.idle',
+                'settings.idleHint',
+                h(
+                  'select',
+                  {
+                    className: 'dsh-dsc-select',
+                    value: String(settings.idleMinutes),
+                    onChange: (event) => updateSetting('idleMinutes', Number(event.target.value)),
+                  },
+                  [
+                    [0, t('settings.idleOff')],
+                    [15, '15 min'],
+                    [30, '30 min'],
+                    [60, '60 min'],
+                  ].map(([value, label]) => h('option', { key: value, value: String(value) }, label)),
+                ),
+              ),
+              h('h3', { className: 'dsh-dsc-subheading' }, t('settings.stats')),
+              h(
+                'div',
+                { className: 'dsh-dsc-stats' },
+                t('settings.statsBody', {
+                  open: metric('dsc_open'),
+                  preview: metric('dsc_handoff_preview'),
+                  ok: metric('dsc_handoff_ok'),
+                  failed: metric('dsc_handoff_failed'),
+                  undo: metric('dsc_undo'),
+                }),
+              ),
+              h(
+                'div',
+                { className: 'dsh-dsc-footer-actions' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-button',
+                    onClick: async () => {
+                      const copied = await copyText(JSON.stringify(metrics, null, 2));
+                      showToast(copied ? t('health.diagnosticsCopied') : t('handoff.error.failed'));
+                    },
+                  },
+                  t('settings.copyStats'),
+                ),
+                h('button', { type: 'button', className: 'dsh-dsc-button', onClick: () => void copyHealthDiagnostics() }, t('settings.copyDiagnostics')),
+                h('button', { type: 'button', className: 'dsh-dsc-button', onClick: clearHistory }, t('settings.clearHistory')),
+                h('span', { className: 'dsh-dsc-spacer' }),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-button',
+                    onClick: () => {
+                      const next = { ...DEFAULT_SETTINGS };
+                      settingsRef.current = next;
+                      setSettings(next);
+                      saveSettings(next);
+                      showToast(t('settings.resetDone'));
+                    },
+                  },
+                  t('settings.reset'),
+                ),
+              ),
+            ),
+          )
+        : null;
+
+      const historyNode = historyOpen
+        ? h(
+            'div',
+            { className: 'dsh-dsc-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('history.title') },
+            h(
+              'div',
+              { className: 'dsh-dsc-modal-card dsh-dsc-modal-settings' },
+              h(
+                'div',
+                { className: 'dsh-dsc-preview-head' },
+                h('div', { className: 'dsh-dsc-preview-head-copy' }, h('h2', { className: 'dsh-dsc-heading' }, t('history.title'))),
+                h(IconButton, { label: t('settings.close'), onClick: () => setHistoryOpen(false) }, h(CloseGlyph, { size: 14 })),
+              ),
+              history.length === 0
+                ? h('div', { className: 'dsh-dsc-empty' }, t('history.empty'))
+                : h(
+                    'div',
+                    { className: 'dsh-dsc-history-list' },
+                    history.map((row) =>
+                      h(
+                        'div',
+                        { key: row.id, className: 'dsh-dsc-history-row' },
+                        h(
+                          'div',
+                          { className: 'dsh-dsc-history-main' },
+                          h('span', null, row.targetTitle === '' ? t('preview.untitled') : row.targetTitle),
+                          h(
+                            'small',
+                            null,
+                            formatStamp(new Date(row.time)) +
+                              ' · ' +
+                              t('history.meta', {
+                                format: t('preview.format.' + (HANDOFF_FORMATS.includes(row.format) ? row.format : 'raw')),
+                                chars: row.chars,
+                                tokens: row.tokens,
+                              }),
+                          ),
+                        ),
+                        h(
+                          'div',
+                          { className: 'dsh-dsc-history-actions' },
+                          h('button', { type: 'button', onClick: () => void copyHistory(row) }, t('history.copy')),
+                          h('button', { type: 'button', onClick: () => exportHistory(row) }, t('preview.export')),
+                          h('button', { type: 'button', onClick: () => reuseHistory(row) }, t('history.reuse')),
+                          h('button', { type: 'button', onClick: () => deleteHistory(row.id) }, t('history.delete')),
+                        ),
+                      ),
+                    ),
+                  ),
+              h(
+                'div',
+                { className: 'dsh-dsc-footer-actions' },
+                h('button', { type: 'button', className: 'dsh-dsc-button', onClick: clearHistory }, t('history.clear')),
+                h('span', { className: 'dsh-dsc-spacer' }),
+                h('button', { type: 'button', className: 'dsh-dsc-button', onClick: () => setHistoryOpen(false) }, t('settings.close')),
+              ),
+            ),
+          )
+        : null;
+
+      const reverseNode = reverseOpen
+        ? h(
+            'div',
+            { className: 'dsh-dsc-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('reverse.title') },
+            h(
+              'div',
+              { className: 'dsh-dsc-modal-card dsh-dsc-modal-settings' },
+              h(
+                'div',
+                { className: 'dsh-dsc-preview-head' },
+                h(
+                  'div',
+                  { className: 'dsh-dsc-preview-head-copy' },
+                  h('h2', { className: 'dsh-dsc-heading' }, t('reverse.title')),
+                  h('p', { className: 'dsh-dsc-text' }, t('reverse.desc')),
+                ),
+                h(IconButton, { label: t('settings.close'), onClick: () => setReverseOpen(false) }, h(CloseGlyph, { size: 14 })),
+              ),
+              h(
+                'div',
+                { className: 'dsh-dsc-preview-line' },
+                h('span', null, t('scenario.title')),
+                SCENARIO_TEMPLATES.map((id) =>
+                  h(
+                    'button',
+                    {
+                      key: id,
+                      type: 'button',
+                      className: 'dsh-dsc-chip',
+                      onClick: () => setReverseText(t('scenario.' + id + '.prompt')),
+                    },
+                    t('scenario.' + id),
+                  ),
+                ),
+              ),
+              h('textarea', {
+                className: 'dsh-dsc-textarea',
+                value: reverseText,
+                placeholder: t('reverse.extraPlaceholder'),
+                onChange: (event) => setReverseText(event.target.value),
+              }),
+              h(
+                'div',
+                { className: 'dsh-dsc-footer-actions' },
+                h('span', { className: 'dsh-dsc-spacer' }),
+                h('button', { type: 'button', className: 'dsh-dsc-button', onClick: () => setReverseOpen(false) }, t('preview.cancel')),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-button dsh-dsc-primary',
+                    disabled: phase !== 'ready' || reverseText.trim() === '',
+                    onClick: () => void fillReverse(),
+                  },
+                  t('reverse.fill'),
+                ),
+              ),
+            ),
+          )
+        : null;
+
+      const healthBanner =
+        health !== null && health.ok !== true && health.auth === 'in' && !healthDismissed
+          ? h(
+              'div',
+              { className: 'dsh-dsc-banner', role: 'status' },
+              h('span', { className: 'dsh-dsc-banner-copy' }, t('health.banner')),
+              h(
+                'div',
+                { className: 'dsh-dsc-banner-actions' },
+                h('button', { type: 'button', onClick: () => void copyHealthDiagnostics() }, t('health.copy')),
+                h('button', { type: 'button', onClick: () => setHealthDismissed(true) }, t('health.dismiss')),
+              ),
+            )
+          : null;
+
       const onboardingNode =
         onboarding && opened
           ? h(
@@ -2561,6 +4487,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         h(
           'section',
           {
+            ref: panelRootRef,
             className: 'dsh-dsc-panel' + (docked ? ' dsh-dsc-panel-docked' : ''),
             style: panelStyle,
             'aria-label': t('window.label'),
@@ -2571,7 +4498,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             { className: 'dsh-dsc-bar' },
             h(IconButton, { label: t('back'), onClick: openFromHeader }, h(BackGlyph, { size: 16 })),
             h('span', { className: 'dsh-dsc-brand' }, h(ChatGlyph, { size: 18 })),
-            h('span', { className: 'dsh-dsc-title' }, t('web.title')),
+            h('span', { className: 'dsh-dsc-title' }, ui.title !== '' ? ui.title : t('web.title')),
             authNode,
             progressNode,
             h('span', { className: 'dsh-dsc-spacer' }),
@@ -2586,7 +4513,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                   title: busy ? t('handoff.busy') : t('handoff.title'),
                   'aria-label': t('handoff.title'),
                   onClick: () => {
-                    void runHandoff('all');
+                    void runHandoff(settingsRef.current.defaultMode);
                   },
                   disabled: busy || phase !== 'ready',
                 },
@@ -2600,8 +4527,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 {
                   type: 'button',
                   className: 'dsh-dsc-handoff-caret',
-                  title: t('handoff.menu.all'),
-                  'aria-label': t('handoff.menu.all'),
+                  title: t('handoff.menu.' + settings.defaultMode),
+                  'aria-label': t('handoff.menu.' + settings.defaultMode),
                   'aria-expanded': menuOpen,
                   onClick: () => setMenuOpen((value) => !value),
                   disabled: busy || phase !== 'ready',
@@ -2619,7 +4546,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                           key: mode,
                           type: 'button',
                           role: 'menuitemradio',
-                          'aria-checked': mode === 'all',
+                          'aria-checked': mode === settings.defaultMode,
                           className: 'dsh-dsc-menu-item',
                           onClick: () => {
                             void runHandoff(mode);
@@ -2628,18 +4555,58 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                         h(
                           'span',
                           { className: 'dsh-dsc-menu-check' },
-                          mode === 'all' ? h(CheckGlyph, { size: 13 }) : null,
+                          mode === settings.defaultMode ? h(CheckGlyph, { size: 13 }) : null,
                         ),
                         h('span', null, t('handoff.menu.' + mode)),
                       ),
+                    ),
+                    h('div', { className: 'dsh-dsc-menu-sep' }),
+                    h(
+                      'button',
+                      { type: 'button', role: 'menuitem', className: 'dsh-dsc-menu-item', onClick: openHistory },
+                      h('span', { className: 'dsh-dsc-menu-check' }, h(HistoryGlyph, { size: 13 })),
+                      h('span', null, t('menu.history')),
+                    ),
+                    h(
+                      'button',
+                      { type: 'button', role: 'menuitem', className: 'dsh-dsc-menu-item', onClick: openReverse },
+                      h('span', { className: 'dsh-dsc-menu-check' }, h(HandoffGlyph, { size: 13 })),
+                      h('span', null, t('menu.reverse')),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        role: 'menuitem',
+                        className: 'dsh-dsc-menu-item',
+                        onClick: () => void runDiagnostics(),
+                      },
+                      h('span', { className: 'dsh-dsc-menu-check' }, h(WarningGlyph, { size: 13 })),
+                      h('span', null, t('menu.diagnostics')),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        role: 'menuitem',
+                        className: 'dsh-dsc-menu-item',
+                        onClick: () => {
+                          setMenuOpen(false);
+                          setSettingsOpen(true);
+                        },
+                      },
+                      h('span', { className: 'dsh-dsc-menu-check' }, h(SettingsGlyph, { size: 13 })),
+                      h('span', null, t('menu.settings')),
                     ),
                   )
                 : null,
             ),
             h(IconButton, { label: docked ? t('dock.off') : t('dock.on'), onClick: toggleDock, active: docked }, h(SplitGlyph, { size: 15 })),
+            h(IconButton, { label: t('menu.settings'), onClick: () => setSettingsOpen(true) }, h(SettingsGlyph, { size: 15 })),
             h(IconButton, { label: t('reload'), onClick: reload }, h(ReloadGlyph, { size: 15 })),
             h(IconButton, { label: t('openExternal'), onClick: openExternal }, h(ExternalGlyph, { size: 15 })),
           ),
+          healthBanner,
           h(
             'div',
             { className: 'dsh-dsc-body' },
@@ -2670,6 +4637,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           reloadNode,
           previewNode,
           onboardingNode,
+          settingsNode,
+          historyNode,
+          reverseNode,
         ),
       );
     }
@@ -2705,7 +4675,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           return;
         }
         if (activePanelId() === PANEL_ID) back();
-        else openPanel();
+        else {
+          track('dsc_open', { source: 'shortcut' });
+          openPanel();
+        }
       };
       const handoffPanel = () => {
         if (panelControl !== null) {
@@ -2764,7 +4737,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 available: () => true,
                 label: () => t('command.open'),
                 description: () => t('command.open.desc'),
-                ui: { kind: 'action', run: () => openPanel() },
+                ui: {
+                  kind: 'action',
+                  run: () => {
+                    track('dsc_open', { source: 'command' });
+                    openPanel();
+                  },
+                },
               }),
             'deepseek-web-chat: command',
           );
@@ -2789,7 +4768,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             name: 'sidebar.panellist',
             id: PANEL_ID,
             order: 5,
-            label: () => t('panel'),
+            label: () => (uiSnapshot.title !== '' ? uiSnapshot.title : t('panel')),
           },
           ChatGlyph,
         ),
@@ -2816,6 +4795,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         estimateTokens,
         selectHandoffMessages,
         formatHandoff,
+        buildStructuredSummary,
+        limitStructuredSummary,
+        conclusionOf,
+        templateDirective,
+        handoffHash,
+        normalizeSettings,
+        loadSettings,
+        saveSettings,
+        loadHistory,
+        saveHistory,
+        recordHandoffHistory,
+        loadMetrics,
+        track,
+        buildDiagnostics,
+        probePageInGuest,
+        fillComposerInGuest,
         sessionTargets,
         currentSessionId,
         extractInGuest,

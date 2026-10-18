@@ -1,10 +1,10 @@
 {
   "name": "@local/dsh-deepseek-web-chat",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "author": "Dream",
-  "description": "A dedicated DeepSeek Web Chat window for the DeepSeek Harness desktop app, with a previewable handoff into the Harness composer.",
+  "description": "A dedicated DeepSeek Web Chat window for the DeepSeek Harness desktop app, with structured, deduplicated and reversible handoffs into the Harness composer.",
   "repository": {
     "type": "git",
     "url": "https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat.git"
