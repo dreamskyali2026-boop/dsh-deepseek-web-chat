@@ -65,6 +65,7 @@ const {
   buildDiagnostics,
   probePageInGuest,
   observeCompletionInGuest,
+  installLinkInterceptorInGuest,
   fillComposerInGuest,
   sessionTargets,
   currentSessionId,
@@ -754,7 +755,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.6');
+  assert.equal(parsed.version, '1.6.7');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
@@ -797,6 +798,34 @@ test('draft bridge messages save non-empty text and clear on empty', () => {
 
   assert.equal(recordDraftMessage({ text: '' }), null);
   assert.equal(loadDraft(1001), null);
+});
+
+test('installLinkInterceptorInGuest registers capture-phase handlers exactly once', () => {
+  const listeners = [];
+  const previous = { document: globalThis.document, window: globalThis.window };
+  globalThis.window = {};
+  globalThis.document = {
+    addEventListener(type, _listener, capture) {
+      listeners.push({ type, capture: capture === true });
+    },
+  };
+  try {
+    assert.equal(installLinkInterceptorInGuest(), true);
+    assert.equal(
+      listeners.some((l) => l.type === 'click' && l.capture === true),
+      true,
+    );
+    assert.equal(
+      listeners.some((l) => l.type === 'auxclick' && l.capture === true),
+      true,
+    );
+    const count = listeners.length;
+    assert.equal(installLinkInterceptorInGuest(), true);
+    assert.equal(listeners.length, count);
+  } finally {
+    globalThis.document = previous.document;
+    globalThis.window = previous.window;
+  }
 });
 
 test('guest observer snapshots the composer and clears it after sending', () => {

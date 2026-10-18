@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.6';
+    const PLUGIN_VERSION = '1.6.7';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const COMPOSER_NOTICE_MS = 10000;
@@ -2988,6 +2988,59 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return JSON.stringify(payload, null, 2);
     }
 
+    function installLinkInterceptorInGuest() {
+      if (window.__DSH_DSC_LINK_HANDLER__ === true) return true;
+      window.__DSH_DSC_LINK_HANDLER__ = true;
+      document.addEventListener(
+        'click',
+        (event) => {
+          if (event.defaultPrevented) return;
+          const anchor =
+            event.target !== null && typeof event.target.closest === 'function'
+              ? event.target.closest('a[href]')
+              : null;
+          if (anchor === null) return;
+          const href = anchor.getAttribute('href') || '';
+          if (href === '' || href.startsWith('#') || href.startsWith('javascript:')) return;
+          try {
+            const url = new URL(href, location.href);
+            if (url.origin === location.origin) return;
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+            event.preventDefault();
+            console.log('__DSH_DSC_LINK__' + JSON.stringify({ url: url.href }));
+          } catch (error) {
+            /* Not a resolvable URL; let the page handle it. */
+          }
+        },
+        true,
+      );
+      document.addEventListener(
+        'auxclick',
+        (event) => {
+          if (event.button !== 1) return;
+          if (event.defaultPrevented) return;
+          const anchor =
+            event.target !== null && typeof event.target.closest === 'function'
+              ? event.target.closest('a[href]')
+              : null;
+          if (anchor === null) return;
+          const href = anchor.getAttribute('href') || '';
+          if (href === '' || href.startsWith('#') || href.startsWith('javascript:')) return;
+          try {
+            const url = new URL(href, location.href);
+            if (url.origin === location.origin) return;
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+            event.preventDefault();
+            console.log('__DSH_DSC_LINK__' + JSON.stringify({ url: url.href }));
+          } catch (error) {
+            /* Not a resolvable URL; let the page handle it. */
+          }
+        },
+        true,
+      );
+      return true;
+    }
+
     function observeCompletionInGuest() {
       if (window.__DSH_DSC_OBSERVER__ === true) return true;
       window.__DSH_DSC_OBSERVER__ = true;
@@ -4408,6 +4461,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             } catch (error) {
               /* Completion observation is best effort. */
             }
+            try {
+              const linking = target.executeJavaScript('(' + installLinkInterceptorInGuest.toString() + ')()', false);
+              if (linking !== undefined && typeof linking.catch === 'function') {
+                linking.catch(() => {});
+              }
+            } catch (error) {
+              /* Link interception is best effort. */
+            }
           }, 1200);
         };
 
@@ -4452,6 +4513,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               recordDraftMessage(JSON.parse(message.slice('__DSH_DSC_DRAFT__'.length)));
             } catch (error) {
               /* Malformed draft messages are ignored. */
+            }
+          }
+          if (message.startsWith('__DSH_DSC_LINK__')) {
+            try {
+              const payload = JSON.parse(message.slice('__DSH_DSC_LINK__'.length));
+              if (payload !== null && typeof payload === 'object' && typeof payload.url === 'string') {
+                const url = new URL(payload.url);
+                if (url.protocol === 'http:' || url.protocol === 'https:') {
+                  window.open(url.href, '_blank', 'noopener,noreferrer');
+                }
+              }
+            } catch (error) {
+              /* Malformed link messages are ignored. */
             }
           }
         };
@@ -6281,6 +6355,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         buildDiagnostics,
         probePageInGuest,
         observeCompletionInGuest,
+        installLinkInterceptorInGuest,
         fillComposerInGuest,
         sessionTargets,
         currentSessionId,
