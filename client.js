@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.10';
+    const PLUGIN_VERSION = '1.6.11';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -581,7 +581,8 @@ window.__ModuleLoader__.load({
       'shortcut.quick': '快速打开 DeepSeek 小窗',
       'quick.expand': '展开到完整面板',
       'quick.hint': '快速提问；按 Esc 关闭',
-      'quick.drag': '按住标题栏拖动小窗；聚焦后可用方向键微调位置',
+      'quick.drag': '按住标题栏拖动小窗；拖到屏幕右缘可分屏停靠；聚焦后可用方向键微调位置',
+      'quick.snapHint': '松开停靠到右侧栏\n与 Harness 对话分屏',
       'menu.history': '接力历史…',
       'menu.reverse': '把 Harness 上下文带到 DeepSeek…',
       'menu.diagnostics': '页面诊断',
@@ -858,7 +859,8 @@ window.__ModuleLoader__.load({
       'shortcut.quick': 'Open the compact DeepSeek window',
       'quick.expand': 'Expand to the full panel',
       'quick.hint': 'Quick question; press Esc to close',
-      'quick.drag': 'Drag the title bar to move this window; arrow keys nudge it when focused',
+      'quick.drag': 'Drag the title bar to move this window; drop it on the right edge to dock and split; arrow keys nudge it when focused',
+      'quick.snapHint': 'Release to dock to the right\nand split with Harness',
       'menu.history': 'Handoff history…',
       'menu.reverse': 'Bring Harness context to DeepSeek…',
       'menu.diagnostics': 'Page diagnostics',
@@ -1068,6 +1070,38 @@ window.__ModuleLoader__.load({
 .dsh-dsc-dragging {
   user-select: none;
   opacity: 0.96;
+}
+.dsh-dsc-snap-hint {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 120px;
+  z-index: 60;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(to left, rgba(78, 110, 242, 0.26), rgba(78, 110, 242, 0.04));
+  border-left: 2px solid var(--dsw-alias-brand, #4e6ef2);
+  animation: dsh-dsc-snap-fade-in 120ms ease-out;
+}
+.dsh-dsc-snap-hint-card {
+  background: var(--dsw-alias-bg-base);
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  padding: 10px;
+  max-width: 92px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  white-space: pre-line;
+}
+@keyframes dsh-dsc-snap-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 .dsh-dsc-panel {
   position: fixed;
@@ -2244,6 +2278,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const top = Number(position.top);
       if (!Number.isFinite(left) || !Number.isFinite(top)) return false;
       return writeJson(QUICK_RECT_KEY, { left: Math.round(left), top: Math.round(top) });
+    }
+
+    // Dragging within this distance of the right viewport edge arms the
+    // snap-to-right-sidebar hint; releasing there docks the window.
+    const QUICK_SNAP_ZONE_PX = 56;
+    const QUICK_SNAP_MIN_VIEWPORT_PX = 720;
+
+    function quickSnapZoneActive(clientX, viewportWidth) {
+      const x = Number(clientX);
+      const width = Number(viewportWidth);
+      if (!Number.isFinite(x) || !Number.isFinite(width)) return false;
+      if (width < QUICK_SNAP_MIN_VIEWPORT_PX) return false;
+      return x >= width - QUICK_SNAP_ZONE_PX;
     }
 
     function shouldShowOnboarding() {
@@ -4071,6 +4118,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [quick, setQuick] = React.useState(false);
       const [quickRect, setQuickRect] = React.useState(null);
       const [quickDragging, setQuickDragging] = React.useState(false);
+      const [quickSnapZone, setQuickSnapZone] = React.useState(false);
       const quickRectRef = React.useRef(null);
       const quickDragRef = React.useRef(null);
       const [historyQuery, setHistoryQuery] = React.useState('');
@@ -4556,6 +4604,43 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         open();
       }, [embedded, quick, docked, active, back, open]);
 
+      const openNativeDock = React.useCallback(() => {
+        setDocked(false);
+        if (typeof openDock !== 'function') {
+          open();
+          showToast(t('dock.fallback'));
+          return;
+        }
+        let result = false;
+        try {
+          result = openDock();
+        } catch (error) {
+          result = false;
+        }
+        if (result === true) {
+          back();
+          return;
+        }
+        if (result !== null && result !== undefined && typeof result.then === 'function') {
+          void result
+            .then((openedTab) => {
+              if (openedTab === true) {
+                back();
+                return;
+              }
+              open();
+              showToast(t('dock.fallback'));
+            })
+            .catch(() => {
+              open();
+              showToast(t('dock.fallback'));
+            });
+          return;
+        }
+        open();
+        showToast(t('dock.fallback'));
+      }, [openDock, open, back, showToast, t]);
+
       const toggleDock = React.useCallback(() => {
         if (embedded) {
           open();
@@ -4564,42 +4649,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         }
         if (quick) {
           setQuick(false);
-          setDocked(false);
           open();
           return;
         }
         if (typeof openDock === 'function') {
-          let result = false;
-          try {
-            result = openDock();
-          } catch (error) {
-            result = false;
-          }
-          if (result === true) {
-            setDocked(false);
-            back();
-            return;
-          }
-          if (result !== null && result !== undefined && typeof result.then === 'function') {
-            setDocked(false);
-            void result
-              .then((openedTab) => {
-                if (openedTab === true) {
-                  back();
-                  return;
-                }
-                open();
-                showToast(t('dock.fallback'));
-              })
-              .catch(() => {
-                open();
-                showToast(t('dock.fallback'));
-              });
-            return;
-          }
-          setDocked(false);
-          open();
-          showToast(t('dock.fallback'));
+          openNativeDock();
           return;
         }
         if (docked) {
@@ -4610,7 +4664,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         setDockRect(dockGeometry(settingsRef.current.dockRatio));
         setDocked(true);
         back();
-      }, [embedded, quick, openDock, closeTab, docked, open, back, showToast, t]);
+      }, [embedded, quick, openNativeDock, closeTab, docked, open, back]);
 
       const resizeDockTo = React.useCallback((width) => {
         const next = clampDockWidth(width);
@@ -4690,6 +4744,33 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         return restoreQuickRect(base, loadQuickRect(), { width: window.innerWidth, height: window.innerHeight });
       }, []);
 
+      const cancelQuickDrag = React.useCallback(() => {
+        const drag = quickDragRef.current;
+        if (drag === null) return;
+        quickDragRef.current = null;
+        setQuickDragging(false);
+        setQuickSnapZone(false);
+        if (drag.element !== null && drag.element !== undefined && typeof drag.element.releasePointerCapture === 'function') {
+          try {
+            drag.element.releasePointerCapture(drag.pointerId);
+          } catch (error) {
+            /* Releasing pointer capture is best effort. */
+          }
+        }
+        const restored = clampQuickRect(
+          { ...quickGeometry(), left: drag.startLeft, top: drag.startTop },
+          { width: window.innerWidth, height: window.innerHeight },
+        );
+        quickRectRef.current = restored;
+        setQuickRect(restored);
+      }, []);
+
+      const snapQuickToDock = React.useCallback(() => {
+        setQuick(false);
+        setQuickSnapZone(false);
+        openNativeDock();
+      }, [openNativeDock]);
+
       const startQuickDrag = React.useCallback(
         (event) => {
           if (!quickRef.current || event.button !== 0) return;
@@ -4713,6 +4794,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             startLeft: current.left,
             startTop: current.top,
             pointerId: event.pointerId,
+            element: event.currentTarget,
+            zone: false,
           };
           setQuickDragging(true);
           try {
@@ -4738,22 +4821,38 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         );
         quickRectRef.current = next;
         setQuickRect(next);
+        const zone = quickSnapZoneActive(event.clientX, window.innerWidth);
+        if (zone !== drag.zone) {
+          drag.zone = zone;
+          setQuickSnapZone(zone);
+        }
         event.preventDefault();
       }, []);
 
-      const endQuickDrag = React.useCallback((event) => {
-        const drag = quickDragRef.current;
-        if (drag === null) return;
-        quickDragRef.current = null;
-        setQuickDragging(false);
-        try {
-          event.currentTarget.releasePointerCapture(drag.pointerId);
-        } catch (error) {
-          /* Releasing pointer capture is best effort. */
-        }
-        const current = quickRectRef.current;
-        if (current !== null && current !== undefined) saveQuickRect(current);
-      }, []);
+      const endQuickDrag = React.useCallback(
+        (event) => {
+          const drag = quickDragRef.current;
+          if (drag === null) return;
+          quickDragRef.current = null;
+          setQuickDragging(false);
+          setQuickSnapZone(false);
+          try {
+            event.currentTarget.releasePointerCapture(drag.pointerId);
+          } catch (error) {
+            /* Releasing pointer capture is best effort. */
+          }
+          if (drag.zone === true && event.type !== 'pointercancel') {
+            // Released inside the right-edge zone: dock into the native right
+            // sidebar instead of remembering the floating position.
+            track('dsc_quick_snap', {});
+            snapQuickToDock();
+            return;
+          }
+          const current = quickRectRef.current;
+          if (current !== null && current !== undefined) saveQuickRect(current);
+        },
+        [snapQuickToDock],
+      );
 
       const keyQuickDrag = React.useCallback(
         (event) => {
@@ -5114,6 +5213,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           const now = Date.now();
           if (now - lastEscapeAt < 250) return;
           lastEscapeAt = now;
+          if (quickDragRef.current !== null) {
+            // Esc during a drag cancels the drag and restores the position
+            // instead of closing layers underneath it.
+            cancelQuickDrag();
+            return;
+          }
           if (menuOpen) {
             setMenuOpen(false);
             return;
@@ -7046,6 +7151,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           settingsNode,
           historyNode,
           reverseNode,
+          quick && quickSnapZone
+            ? h(
+                'div',
+                { className: 'dsh-dsc-snap-hint', role: 'status', 'aria-label': t('quick.snapHint') },
+                h('div', { className: 'dsh-dsc-snap-hint-card' }, t('quick.snapHint')),
+              )
+            : null,
         ),
       );
     }
@@ -7399,6 +7511,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         restoreQuickRect,
         loadQuickRect,
         saveQuickRect,
+        quickSnapZoneActive,
         embeddedBarHeight,
         menuLayout,
         normalizeSettings,

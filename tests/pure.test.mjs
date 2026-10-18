@@ -52,6 +52,7 @@ const {
   restoreQuickRect,
   loadQuickRect,
   saveQuickRect,
+  quickSnapZoneActive,
   embeddedBarHeight,
   menuLayout,
   normalizeSettings,
@@ -502,7 +503,7 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
       if (index === 17) states[index] = true;
       if (index === 19) states[index] = true;
       if (index === 23) states[index] = { status: 'remote', version: 2, fetchedAt: Date.now() };
-      if (index === 29) states[index] = { left: 100, top: 100, width: 220, maxHeight: 300 };
+      if (index === 30) states[index] = { left: 100, top: 100, width: 220, maxHeight: 300 };
       const setter = (value) => {
         states[index] = typeof value === 'function' ? value(states[index]) : value;
       };
@@ -776,7 +777,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.10');
+  assert.equal(parsed.version, '1.6.11');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -1484,6 +1485,16 @@ test('quick window position persists and tolerates corrupt data', () => {
   );
   assert.equal(loadQuickRect(), null);
   saveQuickRect(null);
+});
+
+test('quickSnapZoneActive arms only near the right edge of a wide-enough viewport', () => {
+  assert.equal(quickSnapZoneActive(1200 - 10, 1200), true);
+  assert.equal(quickSnapZoneActive(1200 - 56, 1200), true);
+  assert.equal(quickSnapZoneActive(1200 - 57, 1200), false);
+  assert.equal(quickSnapZoneActive(200, 1200), false);
+  assert.equal(quickSnapZoneActive(1190, 500), false); // viewport too narrow
+  assert.equal(quickSnapZoneActive(NaN, 1200), false);
+  assert.equal(quickSnapZoneActive(100, NaN), false);
 });
 
 test('sanitizeSelectorList filters unsafe entries and caps the list', () => {
