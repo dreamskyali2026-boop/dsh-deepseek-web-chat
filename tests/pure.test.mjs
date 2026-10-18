@@ -58,6 +58,7 @@ const {
   currentSessionId,
   extractInGuest,
   ChatPanel,
+  ChatPanelTab,
   createHandoffDelivery,
 } = plugin.__test;
 
@@ -502,7 +503,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.3.2');
+  assert.equal(parsed.version, '1.4.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
@@ -602,5 +603,66 @@ test('dock geometry clamps width and honors the saved ratio', () => {
     assert.equal(dockGeometry(0.28).width, 448);
   } finally {
     globalThis.window = previous;
+  }
+});
+
+test('embedded ChatPanel renders without the overlay geometry', () => {
+  const refs = [];
+  const states = [];
+  let stateIndex = 0;
+  let refIndex = 0;
+  Object.assign(reactStub, {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+      if (index === 3) states[index] = 'ready';
+      if (index === 14) states[index] = false;
+      if (index === 13) states[index] = 'in';
+      const setter = (value) => {
+        states[index] = typeof value === 'function' ? value(states[index]) : value;
+      };
+      return [states[index], setter];
+    },
+    useRef(initial) {
+      const index = refIndex++;
+      if (!(index in refs)) refs[index] = { current: initial };
+      return refs[index];
+    },
+    useEffect() {},
+    useLayoutEffect() {},
+    useCallback(fn) {
+      return fn;
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { ...previousWindow, innerWidth: 1400, innerHeight: 900 };
+  try {
+    const panel = ChatPanel({
+      back() {},
+      open() {},
+      delivery: { currentSessionId() { return 's1'; }, deliver() { return { ok: false }; } },
+      listTargets() {
+        return [{ id: 's1', title: '当前会话', cwd: '/tmp' }];
+      },
+      t,
+      embedded: true,
+      tabVisible: true,
+      closeTab() {},
+      usePanelInfo(selector) {
+        return selector({ activePanelId: null });
+      },
+    });
+    const flat = JSON.stringify(panel);
+    assert.match(flat, /dsh-dsc-root-embedded/);
+    assert.match(flat, /dsh-dsc-panel-embedded/);
+    assert.equal(flat.includes('dsh-dsc-resize'), false);
+  } finally {
+    globalThis.window = previousWindow;
   }
 });

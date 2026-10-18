@@ -8,12 +8,14 @@ window.__ModuleLoader__.load({
     const NS = 'deepseek-web-chat';
     const TARGET = 'https://chat.deepseek.com/';
     const WORKSPACE_KEY = 'dsh-deepseek-web-chat';
+    const TAB_ID = '@local/dsh-deepseek-web-chat/tab';
+    const TAB_KIND = 'dsh-deepseek-web-chat';
     const ONBOARDING_KEY = 'dsh-deepseek-web-chat.onboarding.v1';
     const SETTINGS_KEY = 'dsh-deepseek-web-chat.settings.v1';
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.3.2';
+    const PLUGIN_VERSION = '1.4.0';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
@@ -355,7 +357,7 @@ window.__ModuleLoader__.load({
       'onboarding.start': '开始使用',
       'dock.on': '并排显示',
       'dock.off': '全屏显示',
-      'dock.title': '并排显示：边看 Harness 边问 DeepSeek',
+      'dock.title': '在右侧栏并排打开：Harness 对话会让出宽度，不再被遮挡',
       'dock.resize': '调整并排宽度',
       'dock.resizeHint': '拖动调整宽度；双击恢复默认；聚焦后按左右方向键微调。',
       'shortcut.toggle': '打开/关闭 DeepSeek 聊天',
@@ -580,7 +582,7 @@ window.__ModuleLoader__.load({
       'onboarding.start': 'Get started',
       'dock.on': 'Side by side',
       'dock.off': 'Full screen',
-      'dock.title': 'Side by side: keep Harness visible while asking DeepSeek',
+      'dock.title': 'Open in the right sidebar: the Harness conversation makes room instead of being covered',
       'dock.resize': 'Resize the side-by-side panel',
       'dock.resizeHint': 'Drag to resize, double-click to reset, or focus and use the arrow keys.',
       'shortcut.toggle': 'Open or close DeepSeek Chat',
@@ -708,6 +710,28 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 .dsh-dsc-root { position: fixed; inset: 0; pointer-events: none; }
+.dsh-dsc-root-embedded {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: auto;
+}
+.dsh-dsc-panel-embedded {
+  position: relative;
+  inset: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  border-left: 0;
+  box-shadow: none;
+}
+.dsh-dsc-panel-embedded .dsh-dsc-bar {
+  height: 44px;
+  padding-top: 0;
+}
 .dsh-dsc-panel {
   position: fixed;
   display: flex;
@@ -1638,6 +1662,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
     function usePanelRect() {
       return React.useSyncExternalStore(subscribePanelRect, getPanelRect, getPanelRect);
+    }
+
+    function useInactivePanelInfo(selector) {
+      return selector({ activePanelId: null });
     }
 
     function currentSessionId(ctx) {
@@ -2764,10 +2792,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return h('div', { ref: seatRef, className: 'dsh-dsc-seat', 'aria-hidden': true });
     }
 
-    function ChatPanel({ back, open, delivery, listTargets, t, usePanelInfo }) {
-      const active = usePanelInfo((info) => info.activePanelId === PANEL_ID);
+    function ChatPanel({
+      back,
+      open,
+      delivery,
+      listTargets,
+      t,
+      usePanelInfo,
+      embedded = false,
+      tabVisible = true,
+      openDock,
+      closeTab,
+    }) {
+      const panelActive = usePanelInfo((info) => info.activePanelId === PANEL_ID);
+      const active = embedded ? true : panelActive;
       const rect = usePanelRect();
-      const [opened, setOpened] = React.useState(false);
+      const [opened, setOpened] = React.useState(embedded);
       const [docked, setDocked] = React.useState(false);
       const [dockRect, setDockRect] = React.useState(null);
       const [phase, setPhase] = React.useState('loading');
@@ -2809,7 +2849,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const handleTitleRef = React.useRef(null);
       const lastSelectionRef = React.useRef('');
       const previousActiveRef = React.useRef(active);
-      const visible = opened && (active || docked);
+      const visible = opened && (embedded ? tabVisible !== false : active || docked);
       const visibleRef = React.useRef(visible);
       const ui = useUiSnapshot();
 
@@ -2866,21 +2906,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }, [settings.idleMinutes, visible, opened]);
 
       React.useLayoutEffect(() => {
+        if (embedded) return;
         if (active && rect !== null && rect.width > 0 && rect.height > 0 && !opened) setOpened(true);
-      }, [active, rect, opened]);
+      }, [embedded, active, rect, opened]);
 
       React.useLayoutEffect(() => {
-        if (!docked) return undefined;
+        if (!docked || embedded) return undefined;
         const update = () => setDockRect(dockGeometry(settingsRef.current.dockRatio));
         update();
         window.addEventListener('resize', update);
         return () => window.removeEventListener('resize', update);
-      }, [docked]);
+      }, [docked, embedded]);
 
       React.useEffect(() => {
-        if (active && !previousActiveRef.current && docked) setDocked(false);
+        if (!embedded && active && !previousActiveRef.current && docked) setDocked(false);
         previousActiveRef.current = active;
-      }, [active, docked]);
+      }, [active, docked, embedded]);
 
       const showToast = React.useCallback((text, actions) => {
         const list = Array.isArray(actions)
@@ -3026,6 +3067,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }, []);
 
       const toggle = React.useCallback(() => {
+        if (embedded) {
+          open();
+          return;
+        }
         if (docked) {
           setDocked(false);
           return;
@@ -3035,9 +3080,27 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           return;
         }
         open();
-      }, [docked, active, back, open]);
+      }, [embedded, docked, active, back, open]);
 
       const toggleDock = React.useCallback(() => {
+        if (embedded) {
+          open();
+          if (typeof closeTab === 'function') closeTab();
+          return;
+        }
+        if (typeof openDock === 'function') {
+          let openedTab = false;
+          try {
+            openedTab = openDock() === true;
+          } catch (error) {
+            openedTab = false;
+          }
+          if (openedTab) {
+            setDocked(false);
+            back();
+            return;
+          }
+        }
         if (docked) {
           setDocked(false);
           open();
@@ -3046,7 +3109,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         setDockRect(dockGeometry(settingsRef.current.dockRatio));
         setDocked(true);
         back();
-      }, [docked, open, back]);
+      }, [embedded, openDock, closeTab, docked, open, back]);
 
       const resizeDockTo = React.useCallback((width) => {
         const next = clampDockWidth(width);
@@ -3406,6 +3469,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             setDocked(false);
             return;
           }
+          if (embedded && typeof closeTab === 'function') {
+            closeTab();
+            return;
+          }
           back();
         };
         window.addEventListener('keydown', onKeyDown);
@@ -3423,6 +3490,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         reverseOpen,
         toast,
         docked,
+        embedded,
+        closeTab,
       ]);
 
       React.useEffect(() => {
@@ -3678,15 +3747,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }, [opened, attempt]);
 
       React.useEffect(() => {
+        if (embedded) return undefined;
         const api = {
           toggle: () => toggleRef.current?.(),
           handoff: () => requestHandoffRef.current?.(),
+          release: () => setOpened(false),
         };
         panelControl = api;
         return () => {
           if (panelControl === api) panelControl = null;
         };
-      }, []);
+      }, [embedded]);
 
       React.useEffect(() => {
         if (!autoHandoffRef.current || !visible || phase !== 'ready') return;
@@ -3962,7 +4033,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         [showToast, t],
       );
 
-      const openFromHeader = docked ? () => setDocked(false) : back;
+      const openFromHeader = embedded ? open : docked ? () => setDocked(false) : back;
 
       if (!opened) return null;
 
@@ -4022,14 +4093,28 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         );
       }
 
-      const geometry = docked ? (dockRect === null ? dockGeometry(settingsRef.current.dockRatio) : dockRect) : rect;
-      const panelStyle = {
-        left: geometry === null ? 0 : geometry.left,
-        top: geometry === null ? 0 : geometry.top,
-        width: geometry === null ? 1 : geometry.width,
-        height: geometry === null ? 1 : geometry.height,
-        display: visible ? 'flex' : 'none',
-      };
+      const geometry = embedded
+        ? null
+        : docked
+          ? dockRect === null
+            ? dockGeometry(settingsRef.current.dockRatio)
+            : dockRect
+          : rect;
+      const panelStyle = embedded
+        ? {
+            position: 'relative',
+            inset: 'auto',
+            width: '100%',
+            height: '100%',
+            display: visible ? 'flex' : 'none',
+          }
+        : {
+            left: geometry === null ? 0 : geometry.left,
+            top: geometry === null ? 0 : geometry.top,
+            width: geometry === null ? 1 : geometry.width,
+            height: geometry === null ? 1 : geometry.height,
+            display: visible ? 'flex' : 'none',
+          };
 
       const authLabel = t('auth.' + authState);
       const authNode =
@@ -4668,12 +4753,15 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
       return h(
         'div',
-        { className: 'dsh-dsc-root' },
+        { className: 'dsh-dsc-root' + (embedded ? ' dsh-dsc-root-embedded' : '') },
         h(
           'section',
           {
             ref: panelRootRef,
-            className: 'dsh-dsc-panel' + (docked ? ' dsh-dsc-panel-docked' : ''),
+            className:
+              'dsh-dsc-panel' +
+              (docked ? ' dsh-dsc-panel-docked' : '') +
+              (embedded ? ' dsh-dsc-panel-embedded' : ''),
             style: panelStyle,
             'aria-label': t('window.label'),
             'aria-hidden': visible ? undefined : true,
@@ -4681,7 +4769,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           h(
             'header',
             { className: 'dsh-dsc-bar' },
-            h(IconButton, { label: t('back'), onClick: openFromHeader }, h(BackGlyph, { size: 16 })),
+            embedded ? null : h(IconButton, { label: t('back'), onClick: openFromHeader }, h(BackGlyph, { size: 16 })),
             h('span', { className: 'dsh-dsc-brand' }, h(ChatGlyph, { size: 18 })),
             h('span', { className: 'dsh-dsc-title' }, ui.title !== '' ? ui.title : t('web.title')),
             authNode,
@@ -4786,12 +4874,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                   )
                 : null,
             ),
-            h(IconButton, { label: docked ? t('dock.off') : t('dock.on'), onClick: toggleDock, active: docked }, h(SplitGlyph, { size: 15 })),
+            h(IconButton, { label: embedded || docked ? t('dock.off') : t('dock.on'), onClick: toggleDock, active: docked && !embedded }, h(SplitGlyph, { size: 15 })),
             h(IconButton, { label: t('menu.settings'), onClick: () => setSettingsOpen(true) }, h(SettingsGlyph, { size: 15 })),
             h(IconButton, { label: t('reload'), onClick: reload }, h(ReloadGlyph, { size: 15 })),
             h(IconButton, { label: t('openExternal'), onClick: openExternal }, h(ExternalGlyph, { size: 15 })),
           ),
-          docked
+          docked && !embedded
             ? h('div', {
                 className: 'dsh-dsc-resize' + (dockDragging ? ' dsh-dsc-resize-active' : ''),
                 role: 'separator',
@@ -4848,6 +4936,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       );
     }
 
+    function ChatPanelTab(props) {
+      const tab = props.useTabInfo();
+      const closeTab =
+        tab !== null && tab !== undefined && tab.actions !== undefined && typeof tab.actions.close === 'function'
+          ? () => tab.actions.close()
+          : undefined;
+      return h(ChatPanel, {
+        ...props,
+        embedded: true,
+        tabVisible: tab === null || tab === undefined || tab.visible !== false,
+        closeTab,
+        usePanelInfo: useInactivePanelInfo,
+      });
+    }
+
     function apply(ctx) {
       const t = ctx.locale.bind(NS);
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'deepseek-web-chat: dictionaries');
@@ -4866,6 +4969,24 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const openPanel = () => ctx.layout.selectPanel(PANEL_ID);
       const delivery = createHandoffDelivery(ctx);
       const listTargets = () => sessionTargets(ctx, t);
+      const openSidebarTab = () => {
+        const sidebar = ctx.get('sidebarRight');
+        if (sidebar === undefined || sidebar === null || typeof sidebar.openTab !== 'function') return false;
+        try {
+          sidebar.openTab(TAB_KIND);
+        } catch (error) {
+          console.warn('DeepSeek chat: could not open the native right sidebar tab', error);
+          return false;
+        }
+        if (panelControl !== null && typeof panelControl.release === 'function') {
+          try {
+            panelControl.release();
+          } catch (error) {
+            console.warn('DeepSeek chat: could not release the full-screen panel', error);
+          }
+        }
+        return true;
+      };
       const activePanelId = () => {
         try {
           return ctx.layout.panelInfo.getSnapshot().activePanelId;
@@ -4956,6 +5077,36 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         console.warn('DeepSeek chat: could not register the /deepseek command', error);
       }
 
+      try {
+        const tabs = ctx.get('sidebarRightTabs');
+        if (tabs !== undefined && tabs !== null && typeof tabs.register === 'function') {
+          ctx.effect(
+            () =>
+              tabs.register({
+                id: TAB_ID,
+                kind: TAB_KIND,
+                title: () => (uiSnapshot.title !== '' ? uiSnapshot.title : t('panel')),
+                keepMounted: true,
+              }),
+            'deepseek-web-chat: right sidebar tab type',
+          );
+        }
+      } catch (error) {
+        console.warn('DeepSeek chat: could not register the native right sidebar tab type', error);
+      }
+
+      ctx.slots.inject('sidebar.right.pane.tab', () =>
+        ctx.slots.register(
+          {
+            name: 'sidebar.right.pane.tab',
+            key: TAB_ID,
+            locale: NS,
+            inject: () => ({ back, open: openPanel, delivery, listTargets }),
+          },
+          ChatPanelTab,
+        ),
+      );
+
       ctx.slots.inject('main', () =>
         ctx.slots.register(
           {
@@ -4985,7 +5136,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             id: 'deepseek-web-chat.panel',
             order: -5,
             locale: NS,
-            inject: () => ({ back, open: openPanel, delivery, listTargets }),
+            inject: () => ({ back, open: openPanel, delivery, listTargets, openDock: openSidebarTab }),
           },
           ChatPanel,
         ),
@@ -5022,6 +5173,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         currentSessionId,
         extractInGuest,
         ChatPanel,
+        ChatPanelTab,
         createHandoffDelivery,
       },
     };
