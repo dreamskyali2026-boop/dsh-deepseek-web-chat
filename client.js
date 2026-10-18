@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.5';
+    const PLUGIN_VERSION = '1.6.6';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const COMPOSER_NOTICE_MS = 10000;
@@ -4326,6 +4326,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         let failed = false;
         let element = null;
         let lease = null;
+        let unsubscribeOpenRequested = null;
         let navigationStarted = false;
         let firstDocument = true;
         let attachTimer = 0;
@@ -4470,6 +4471,15 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               return;
             }
             lease = reservation.lease;
+            if (typeof bridge.onOpenRequested === 'function') {
+              unsubscribeOpenRequested = bridge.onOpenRequested(lease, (url) => {
+                try {
+                  window.open(String(url), '_blank', 'noopener,noreferrer');
+                } catch (error) {
+                  console.warn('DeepSeek chat: could not open the requested link', error);
+                }
+              });
+            }
 
             const view = document.createElement('webview');
             element = view;
@@ -4505,6 +4515,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             view.removeEventListener('render-process-gone', onRenderProcessGone);
             view.removeEventListener('console-message', onConsoleMessage);
             view.remove();
+          }
+          if (unsubscribeOpenRequested !== null) {
+            try {
+              unsubscribeOpenRequested();
+            } catch (error) {
+              /* Unsubscribing from link requests is best effort. */
+            }
+            unsubscribeOpenRequested = null;
           }
           if (lease !== null) {
             const released = lease;

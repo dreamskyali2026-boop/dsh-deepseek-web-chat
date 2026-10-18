@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V1.6.5　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V1.6.6　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -93,6 +93,7 @@
 - 面板顶部会显示「已登录 / 未登录」徽标；未登录时点击徽标可直接重新加载登录页。
 - 完全退出并重新启动应用后，需要重新登录 DeepSeek 网页版；未登录时面板顶部会说明该限制，并提供「在浏览器中打开」和「去登录」。
 - 如果希望使用浏览器自身的持久登录，请点击面板顶部的「在浏览器中打开」。它会在系统默认浏览器中打开同一个地址。
+- 聊天消息里的外部链接会在系统默认浏览器中打开，不会在面板内导航离开 DeepSeek。
 
 ## 为什么不修改客户端文件
 
