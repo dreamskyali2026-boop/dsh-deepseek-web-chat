@@ -67,6 +67,7 @@ const {
   probePageInGuest,
   observeCompletionInGuest,
   installLinkInterceptorInGuest,
+  installEscBridgeInGuest,
   fillComposerInGuest,
   sessionTargets,
   currentSessionId,
@@ -75,6 +76,14 @@ const {
   mergeCapturedMessages,
   mergePreviewMessages,
   undoInsertedDraft,
+  captureComposerInsertion,
+  resolveInsertionPlan,
+  sanitizeSelectorList,
+  normalizeRemoteSelectors,
+  selectorCandidateSet,
+  loadCachedSelectors,
+  saveCachedSelectors,
+  probeSelectorsInGuest,
   dockPaneById,
   ChatPanel,
   ChatPanelTab,
@@ -488,7 +497,8 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
       if (index === 16) states[index] = true;
       if (index === 17) states[index] = true;
       if (index === 19) states[index] = true;
-      if (index === 27) states[index] = { left: 100, top: 100, width: 220, maxHeight: 300 };
+      if (index === 23) states[index] = { status: 'remote', version: 2, fetchedAt: Date.now() };
+      if (index === 28) states[index] = { left: 100, top: 100, width: 220, maxHeight: 300 };
       const setter = (value) => {
         states[index] = typeof value === 'function' ? value(states[index]) : value;
       };
@@ -534,8 +544,14 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
     assert.match(flat, /dsh-dsc-preview-capture/);
     assert.match(flat, /dsh-dsc-toast/);
     assert.match(flat, /preview\.insert/);
+    assert.match(flat, /preview\.insertPosition/);
+    assert.match(flat, /preview\.insertCursor/);
+    assert.match(flat, /preview\.insertCursorUnavailable/);
     assert.match(flat, /dsh-dsc-modal-settings/);
     assert.match(flat, /settings\.title/);
+    assert.match(flat, /settings\.remoteSelectors/);
+    assert.match(flat, /settings\.selectorStatusRemote/);
+    assert.match(flat, /settings\.selectorRefresh/);
     assert.match(flat, /history\.empty/);
     assert.match(flat, /reverse\.title/);
   } finally {
@@ -756,9 +772,11 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.6.8');
+  assert.equal(parsed.version, '1.6.9');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
+  assert.equal(typeof parsed.selectorFallback, 'object');
+  assert.equal(typeof parsed.selectorFallback.url, 'string');
   assert.equal(text.includes('一段很长的对话标题'), false);
   assert.equal(text.includes('No conversation content'), true);
 });
@@ -1196,4 +1214,413 @@ test('menuLayout clamps to a narrow panel and flips upward near the bottom', () 
   assert.equal(flipped.bottom, 146);
   assert.equal(flipped.top, undefined);
   assert.equal(flipped.width, 184);
+});
+
+// --- V1.6.9: guest Esc bridge (R5) ------------------------------------------
+
+test('guest Esc bridge forwards unconsumed Escape presses and skips page dialogs', () => {
+  const logs = [];
+  const handlers = [];
+  const previous = { document: globalThis.document, window: globalThis.window, log: console.log, now: Date.now };
+  let now = 1000;
+  Date.now = () => now;
+  globalThis.document = {
+    addEventListener(type, handler) {
+      handlers.push({ type, handler });
+    },
+    removeEventListener() {},
+  };
+  globalThis.window = { ...previous.window };
+  console.log = (line) => logs.push(line);
+  const plainTarget = { parentElement: null, getAttribute: () => null };
+  const dialogTarget = {
+    parentElement: null,
+    getAttribute(name) {
+      return name === 'role' ? 'dialog' : null;
+    },
+  };
+  const fire = (event) => {
+    for (const entry of handlers) {
+      if (entry.type === 'keydown') entry.handler(event);
+    }
+  };
+  try {
+    assert.equal(installEscBridgeInGuest(), true);
+    assert.equal(handlers.length, 1);
+    assert.equal(installEscBridgeInGuest(), true);
+    assert.equal(handlers.length, 1);
+
+    fire({ key: 'Escape', defaultPrevented: false, target: plainTarget });
+    assert.equal(logs.filter((line) => line === '__DSH_DSC_ESC__{}').length, 1);
+
+    logs.length = 0;
+    fire({ key: 'Escape', defaultPrevented: true, target: plainTarget });
+    fire({ key: 'Escape', defaultPrevented: false, target: dialogTarget });
+    fire({ key: 'Enter', defaultPrevented: false, target: plainTarget });
+    assert.equal(logs.length, 0);
+
+    now += 500;
+    fire({ key: 'Escape', defaultPrevented: false, target: plainTarget });
+    fire({ key: 'Escape', defaultPrevented: false, target: plainTarget });
+    assert.equal(logs.length, 1);
+
+    now += 500;
+    fire({ key: 'Escape', defaultPrevented: false, target: plainTarget });
+    assert.equal(logs.length, 2);
+  } finally {
+    globalThis.document = previous.document;
+    globalThis.window = previous.window;
+    console.log = previous.log;
+    Date.now = previous.now;
+  }
+});
+
+// --- V1.6.9: insert position (E2) --------------------------------------------
+
+test('resolveInsertionPlan validates bounds and anchors before inserting at the cursor', () => {
+  assert.deepEqual(resolveInsertionPlan('hello world', { start: 5, end: 5, anchor: 'hello' }), {
+    mode: 'cursor',
+    start: 5,
+    end: 5,
+  });
+  assert.equal(resolveInsertionPlan('hello world', { start: 5, end: 5, anchor: 'nope!' }).mode, 'end');
+  assert.equal(resolveInsertionPlan('hi', { start: 9, end: 9 }).mode, 'end');
+  assert.equal(resolveInsertionPlan('hi', { start: 2, end: 2 }).mode, 'end');
+  assert.equal(resolveInsertionPlan('hi', null).mode, 'end');
+  assert.equal(resolveInsertionPlan('hi', { start: -1, end: 0 }).mode, 'end');
+  assert.equal(resolveInsertionPlan('hi', { start: NaN, end: 1 }).mode, 'end');
+  assert.deepEqual(resolveInsertionPlan('hello', { start: 2, end: 9, anchor: 'he' }), { mode: 'cursor', start: 2, end: 5 });
+});
+
+test('captureComposerInsertion clamps offsets and reads the anchor from the live element', () => {
+  const element = { isConnected: true, value: '0123456789' };
+  const insertion = captureComposerInsertion({ element, start: 8, end: 20 }, 's1');
+  assert.equal(insertion.sessionId, 's1');
+  assert.equal(insertion.start, 8);
+  assert.equal(insertion.end, 10);
+  assert.equal(insertion.anchor, '01234567');
+  assert.equal(captureComposerInsertion({ element, start: 20, end: 30 }, 's1').start, 10);
+  assert.equal(captureComposerInsertion({ element, start: 1 }, ''), null);
+  assert.equal(captureComposerInsertion({ element: null, start: 1 }, 's1'), null);
+  assert.equal(captureComposerInsertion(null, 's1'), null);
+  assert.equal(captureComposerInsertion({ element: { isConnected: false, value: 'x' }, start: 0 }, 's1'), null);
+  assert.equal(captureComposerInsertion({ element: { isConnected: true, value: 'x' }, start: 'a' }, 's1'), null);
+});
+
+test('undoInsertedDraft honors an explicit offset for mid-draft blocks', () => {
+  assert.equal(undoInsertedDraft('prefix NEW MID suffixZ', 'prefix MID suffix', 'NEW ', 7).text, 'prefix MID suffixZ');
+  assert.equal(
+    undoInsertedDraft('prefix NEW MID NEW suffix', 'prefix MID NEW suffix', 'NEW ', 7).text,
+    'prefix MID NEW suffix',
+  );
+  // A replaced selection is restored on undo.
+  assert.equal(undoInsertedDraft('前[新]后', '前旧后', '[新]', 1, '旧').text, '前旧后');
+  // Offset that no longer matches the block falls back to positional matching.
+  assert.equal(undoInsertedDraft('changed NEW here', 'base', 'NEW ', 3).ok, true);
+  assert.equal(undoInsertedDraft('no block', 'base', 'NEW ', 3).ok, false);
+  // End-of-draft appends keep working with and without the offset.
+  assert.equal(undoInsertedDraft('existing\n\nhandoff', 'existing', '\n\nhandoff').text, 'existing');
+  assert.equal(undoInsertedDraft('existing\n\nhandoff', 'existing', '\n\nhandoff', 8).text, 'existing');
+});
+
+test('delivery inserts at the captured cursor, undoes it, and falls back to the end safely', () => {
+  const inserted = [];
+  const makeCtx = (shell) => ({
+    get(name) {
+      if (name === 'conversation') return { input: { shell: (id) => (id === 's1' ? shell : null) } };
+      return undefined;
+    },
+  });
+  let draft = '你好，世界。再见';
+  const shell = {
+    rev: 3,
+    projection: {
+      get detectText() {
+        return draft;
+      },
+    },
+    actions: {
+      insertText(text, span) {
+        if (span.draftRev !== 3) return false;
+        inserted.push({ text, span });
+        draft = draft.slice(0, span.start) + text + draft.slice(span.end);
+        return true;
+      },
+      setDraft(value) {
+        draft = value;
+      },
+    },
+  };
+  const delivery = createHandoffDelivery(makeCtx(shell));
+
+  const result = delivery.deliver('NEW', 's1', { sessionId: 's1', start: 3, end: 5, anchor: '你好，' });
+  assert.equal(result.ok, true);
+  assert.equal(result.position, 'cursor');
+  assert.equal(result.offset, 3);
+  assert.equal(result.before, '你好，世界。再见');
+  assert.equal(result.inserted, 'NEW');
+  assert.equal(result.replaced, '世界');
+  assert.equal(draft, '你好，NEW。再见');
+  assert.equal(inserted[0].span.start, 3);
+  assert.equal(inserted[0].span.end, 5);
+
+  const undone = delivery.undo(result);
+  assert.equal(undone.ok, true);
+  assert.equal(draft, '你好，世界。再见');
+
+  draft = '完全不同的草稿';
+  const anchorMiss = delivery.deliver('TAIL', 's1', { sessionId: 's1', start: 3, end: 5, anchor: '你好，' });
+  assert.equal(anchorMiss.position, 'end');
+  assert.match(draft, /\n\nTAIL$/);
+
+  draft = 'abc';
+  const crossSession = delivery.deliver('X', 's1', { sessionId: 's2', start: 1, end: 1, anchor: 'a' });
+  assert.equal(crossSession.position, 'end');
+
+  draft = 'abc';
+  const beyondEnd = delivery.deliver('X', 's1', { sessionId: 's1', start: 99, end: 99, anchor: '' });
+  assert.equal(beyondEnd.position, 'end');
+
+  draft = 'abc';
+  const atEnd = delivery.deliver('X', 's1', { sessionId: 's1', start: 3, end: 3, anchor: 'abc' });
+  assert.equal(atEnd.position, 'end');
+  assert.equal(draft, 'abc\n\nX');
+});
+
+// --- V1.6.9: remote selector fallback (R1) -----------------------------------
+
+test('observer installer updates the live selector set without duplicating', () => {
+  const previous = { document: globalThis.document, window: globalThis.window, log: console.log };
+  globalThis.document = {
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    title: '',
+  };
+  globalThis.window = { setInterval: () => 1 };
+  console.log = () => {};
+  try {
+    observeCompletionInGuest(null);
+    assert.deepEqual(globalThis.window.__DSH_DSC_SELECTORS__.assistant, ['.ds-assistant-message-main-content']);
+    assert.deepEqual(globalThis.window.__DSH_DSC_SELECTORS__.composer, ['textarea', '[contenteditable="true"]']);
+
+    observeCompletionInGuest({ selectors: { assistant: ['.new-assistant'] } });
+    assert.deepEqual(globalThis.window.__DSH_DSC_SELECTORS__.assistant, [
+      '.new-assistant',
+      '.ds-assistant-message-main-content',
+    ]);
+    assert.equal(globalThis.window.__DSH_DSC_OBSERVER__, true);
+
+    observeCompletionInGuest({ selectors: { composer: ['.new-composer'] } });
+    assert.deepEqual(globalThis.window.__DSH_DSC_SELECTORS__.composer, [
+      '.new-composer',
+      'textarea',
+      '[contenteditable="true"]',
+    ]);
+  } finally {
+    globalThis.document = previous.document;
+    globalThis.window = previous.window;
+    console.log = previous.log;
+  }
+});
+
+test('sanitizeSelectorList filters unsafe entries and caps the list', () => {
+  assert.deepEqual(
+    sanitizeSelectorList(['.a', '.a', '  .b  ', 42, '', 'x'.repeat(121), '.c[href="1"]', '<img>', '.d\\e', '.f:hover']),
+    ['.a', '.b', '.c[href="1"]', '.f:hover'],
+  );
+  assert.deepEqual(sanitizeSelectorList(null), []);
+  assert.deepEqual(sanitizeSelectorList('nope'), []);
+  assert.deepEqual(sanitizeSelectorList(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']), [
+    'a',
+    'b',
+    'c',
+    'd',
+    'e',
+    'f',
+    'g',
+    'h',
+  ]);
+});
+
+test('normalizeRemoteSelectors accepts valid payloads and rejects downgrades or junk', () => {
+  const good = normalizeRemoteSelectors(
+    { version: 2, selectors: { messages: ['.new-item'], composer: ['textarea'] } },
+    1,
+  );
+  assert.equal(good.version, 2);
+  assert.deepEqual(good.selectors.messages, ['.new-item']);
+  assert.equal(good.selectors.think, undefined);
+
+  assert.notEqual(normalizeRemoteSelectors({ version: 1, selectors: { messages: ['.x'] } }, 1), null);
+  assert.equal(normalizeRemoteSelectors({ version: 0, selectors: { messages: ['.x'] } }, 1), null);
+  assert.equal(normalizeRemoteSelectors({ version: 3, selectors: { bogus: ['.x'] } }, 1), null);
+  assert.equal(normalizeRemoteSelectors({ version: 3, selectors: { messages: ['<script>'] } }, 1), null);
+  assert.equal(normalizeRemoteSelectors({ version: 3 }, 1), null);
+  assert.equal(normalizeRemoteSelectors(null, 1), null);
+  assert.equal(normalizeRemoteSelectors({ version: 'two', selectors: { messages: ['.x'] } }, 1), null);
+
+  const keyed = normalizeRemoteSelectors(
+    { version: 3, keyAttribute: 'data-msg-id', selectors: { messages: ['.m'] } },
+    1,
+  );
+  assert.equal(keyed.keyAttribute, 'data-msg-id');
+  const badKey = normalizeRemoteSelectors(
+    { version: 3, keyAttribute: 'onclick', selectors: { messages: ['.m'] } },
+    1,
+  );
+  assert.equal(badKey.keyAttribute, undefined);
+});
+
+test('selectorCandidateSet puts remote selectors first and keeps the local fallback', () => {
+  const merged = selectorCandidateSet({ version: 2, selectors: { messages: ['.new-item'] } });
+  assert.equal(merged.source, 'remote');
+  assert.equal(merged.version, 2);
+  assert.deepEqual(merged.selectors.messages, ['.new-item', '[data-virtual-list-item-key]']);
+  assert.deepEqual(merged.selectors.think, ['.ds-think-content']);
+  assert.deepEqual(merged.selectors.composer, ['textarea', '[contenteditable="true"]']);
+
+  const local = selectorCandidateSet(null);
+  assert.equal(local.source, 'local');
+  assert.equal(local.version, 1);
+  assert.deepEqual(local.selectors.messages, ['[data-virtual-list-item-key]']);
+});
+
+test('cached selectors roundtrip through localStorage and reject corrupt entries', () => {
+  saveCachedSelectors(null);
+  assert.equal(loadCachedSelectors(), null);
+  assert.equal(
+    saveCachedSelectors({
+      version: 2,
+      selectors: { messages: ['.m'] },
+      keyAttribute: 'data-msg-id',
+      fetchedAt: 123,
+      url: 'https://example.com/s.json',
+    }),
+    true,
+  );
+  const cached = loadCachedSelectors();
+  assert.equal(cached.version, 2);
+  assert.equal(cached.keyAttribute, 'data-msg-id');
+  assert.equal(cached.fetchedAt, 123);
+  assert.equal(cached.url, 'https://example.com/s.json');
+
+  window.localStorage.setItem('dsh-deepseek-web-chat.selectors.v1', '{not json');
+  assert.equal(loadCachedSelectors(), null);
+  window.localStorage.setItem(
+    'dsh-deepseek-web-chat.selectors.v1',
+    JSON.stringify({ version: 9, selectors: { messages: ['<bad>'] } }),
+  );
+  assert.equal(loadCachedSelectors(), null);
+  window.localStorage.setItem(
+    'dsh-deepseek-web-chat.selectors.v1',
+    JSON.stringify({ version: 0, selectors: { messages: ['.m'] } }),
+  );
+  assert.equal(loadCachedSelectors(), null);
+  saveCachedSelectors(null);
+  assert.equal(loadCachedSelectors(), null);
+});
+
+test('probeSelectorsInGuest reports which remote selectors hit the page', () => {
+  const previous = { document: globalThis.document };
+  globalThis.document = {
+    querySelector(selector) {
+      if (selector === '.new-item' || selector === 'textarea') return {};
+      return null;
+    },
+  };
+  try {
+    const hits = probeSelectorsInGuest({
+      version: 2,
+      selectors: { messages: ['.new-item'], assistant: ['.miss'], composer: ['textarea'] },
+    });
+    assert.equal(hits.messages, true);
+    assert.equal(hits.assistant, false);
+    assert.equal(hits.composer, true);
+    assert.deepEqual(probeSelectorsInGuest(null), {
+      messages: false,
+      assistant: false,
+      think: false,
+      composer: false,
+    });
+  } finally {
+    globalThis.document = previous.document;
+  }
+});
+
+test('extractInGuest falls forward to remote selectors when the local set misses', async () => {
+  const content = mkEl('DIV', { class: 'new-assistant' }, [mkEl('P', {}, [mkText('改版后的回复')])]);
+  const item = mkEl('DIV', { class: 'new-item', 'data-msg-id': 'k9' }, [content]);
+  const scroller = { parentElement: null, scrollHeight: 300, clientHeight: 400, scrollTop: 0 };
+  const body = { parentElement: null };
+  scroller.parentElement = body;
+  item.parentElement = scroller;
+
+  const previous = {
+    document: globalThis.document,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    getComputedStyle: globalThis.getComputedStyle,
+    log: console.log,
+  };
+  globalThis.document = {
+    baseURI: 'https://chat.deepseek.com/',
+    body,
+    scrollingElement: body,
+    documentElement: body,
+    querySelector(selector) {
+      if (selector === '.new-item') return item;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '.new-item') return [item];
+      return [];
+    },
+  };
+  globalThis.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+  globalThis.getComputedStyle = () => ({ overflowY: 'auto' });
+  console.log = () => {};
+  try {
+    const remote = {
+      version: 2,
+      keyAttribute: 'data-msg-id',
+      selectors: { messages: ['.new-item'], assistant: ['.new-assistant'] },
+    };
+    const result = await extractInGuest('all', null, remote);
+    assert.equal(result.ok, true);
+    assert.equal(result.messages.length, 1);
+    assert.equal(result.messages[0].role, 'assistant');
+    assert.equal(result.messages[0].text, '改版后的回复');
+    assert.equal(result.messages[0].key, 'k9');
+
+    const without = await extractInGuest('all', null, null);
+    assert.equal(without.ok, false);
+    assert.equal(without.reason, 'no-messages');
+  } finally {
+    console.log = previous.log;
+    globalThis.document = previous.document;
+    globalThis.requestAnimationFrame = previous.requestAnimationFrame;
+    globalThis.getComputedStyle = previous.getComputedStyle;
+  }
+});
+
+test('captureSegment forwards the remote selector set to the guest source', async () => {
+  let source = '';
+  await captureSegment(
+    {
+      executeJavaScript(input) {
+        source = input;
+        return Promise.resolve({ ok: true, messages: [], done: true, atStart: true });
+      },
+    },
+    'all',
+    null,
+    1000,
+    { version: 2, keyAttribute: 'data-msg-id', selectors: { messages: ['.new-item'] } },
+  );
+  assert.match(source, /extractInGuest/);
+  assert.match(source, /\.new-item/);
+  assert.match(source, /data-msg-id/);
 });

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "selectors": {
+    "messages": ["[data-virtual-list-item-key]"],
+    "assistant": [".ds-assistant-message-main-content"],
+    "think": [".ds-think-content"],
+    "composer": ["textarea", "[contenteditable=\"true\"]"]
+  }
+}

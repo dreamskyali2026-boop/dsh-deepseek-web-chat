@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-deepseek-web-chat",
-  "version": "1.6.8",
+  "version": "1.6.9",
   "private": true,
   "type": "module",
   "author": "Dream",
@@ -38,7 +38,8 @@
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "selectors.json"
   ],
   "dsh": {
     "manifestVersion": 1,

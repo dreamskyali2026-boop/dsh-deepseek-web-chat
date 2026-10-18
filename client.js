@@ -16,8 +16,24 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.8';
+    const PLUGIN_VERSION = '1.6.9';
     const SELECTOR_VERSION = 1;
+    const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
+    const SELECTORS_URL =
+      'https://raw.githubusercontent.com/dreamskyali2026-boop/dsh-deepseek-web-chat/main/selectors.json';
+    const SELECTORS_TTL_MS = 6 * 60 * 60 * 1000;
+    const SELECTORS_RETRY_MS = 30 * 60 * 1000;
+    const SELECTORS_FETCH_TIMEOUT_MS = 8000;
+    const SELECTOR_KEYS = ['messages', 'assistant', 'think', 'composer'];
+    const LOCAL_SELECTOR_SET = Object.freeze({
+      version: SELECTOR_VERSION,
+      selectors: Object.freeze({
+        messages: Object.freeze(['[data-virtual-list-item-key]']),
+        assistant: Object.freeze(['.ds-assistant-message-main-content']),
+        think: Object.freeze(['.ds-think-content']),
+        composer: Object.freeze(['textarea', '[contenteditable="true"]']),
+      }),
+    });
     const HANDOFF_LIMIT = 20000;
     const COMPOSER_NOTICE_MS = 10000;
     const UNDO_WINDOW_MS = 12000;
@@ -40,6 +56,8 @@ window.__ModuleLoader__.load({
       idleMinutes: 0,
       autoSend: false,
       dockRatio: 0.42,
+      remoteSelectors: true,
+      selectorUrl: SELECTORS_URL,
     });
     let panelControl = null;
     let undoValue = null;
@@ -102,6 +120,13 @@ window.__ModuleLoader__.load({
         dedupe: typeof raw.dedupe === 'boolean' ? raw.dedupe : DEFAULT_SETTINGS.dedupe,
         idleMinutes: idle === 15 || idle === 30 || idle === 60 ? idle : 0,
         autoSend: typeof raw.autoSend === 'boolean' ? raw.autoSend : DEFAULT_SETTINGS.autoSend,
+        remoteSelectors:
+          typeof raw.remoteSelectors === 'boolean' ? raw.remoteSelectors : DEFAULT_SETTINGS.remoteSelectors,
+        selectorUrl: (() => {
+          const url = typeof raw.selectorUrl === 'string' ? raw.selectorUrl.trim() : '';
+          if (url === '' || url.length > 500 || !/^https?:\/\/\S+$/i.test(url)) return DEFAULT_SETTINGS.selectorUrl;
+          return url;
+        })(),
         dockRatio: (() => {
           const ratio = Number(raw.dockRatio);
           if (!Number.isFinite(ratio)) return DEFAULT_SETTINGS.dockRatio;
@@ -116,6 +141,103 @@ window.__ModuleLoader__.load({
 
     function saveSettings(settings) {
       return writeJson(SETTINGS_KEY, normalizeSettings(settings));
+    }
+
+    // --- Remote selector fallback (R1) -------------------------------------
+    // A remote selectors.json can only add CSS candidate selectors; entries are
+    // charset- and length-checked so a broken or hostile file can never inject
+    // code, only fail to match (and then the local set stays in the chain).
+
+    function sanitizeSelectorList(value) {
+      if (!Array.isArray(value)) return [];
+      const rows = [];
+      for (const entry of value) {
+        if (typeof entry !== 'string') continue;
+        const selector = entry.trim();
+        if (selector === '' || selector.length > 120) continue;
+        if (!/^[-#.[\]()='"a-zA-Z0-9_,: >~+*|^$]+$/.test(selector)) continue;
+        if (rows.indexOf(selector) === -1) rows.push(selector);
+        if (rows.length >= 8) break;
+      }
+      return rows;
+    }
+
+    function normalizeRemoteSelectors(payload, localVersion) {
+      if (payload === null || typeof payload !== 'object') return null;
+      const base = Number.isFinite(localVersion) ? localVersion : SELECTOR_VERSION;
+      const version = Number(payload.version);
+      if (!Number.isFinite(version) || version < 1 || version < base) return null;
+      const source = payload.selectors;
+      if (source === null || typeof source !== 'object') return null;
+      const selectors = {};
+      let any = false;
+      for (const key of SELECTOR_KEYS) {
+        const list = sanitizeSelectorList(source[key]);
+        if (list.length > 0) {
+          selectors[key] = list;
+          any = true;
+        }
+      }
+      if (!any) return null;
+      const keyAttribute =
+        typeof payload.keyAttribute === 'string' && /^data-[a-zA-Z0-9-]{1,48}$/.test(payload.keyAttribute)
+          ? payload.keyAttribute
+          : undefined;
+      return { version: Math.floor(version), selectors, ...(keyAttribute === undefined ? {} : { keyAttribute }) };
+    }
+
+    function selectorCandidateSet(remote) {
+      const merged = {
+        version: remote !== null && remote !== undefined ? remote.version : SELECTOR_VERSION,
+        source: remote !== null && remote !== undefined ? 'remote' : 'local',
+        selectors: {},
+      };
+      for (const key of SELECTOR_KEYS) {
+        const rows = [];
+        const remoteList =
+          remote !== null && remote !== undefined && Array.isArray(remote.selectors[key])
+            ? remote.selectors[key]
+            : [];
+        for (const selector of remoteList.concat(LOCAL_SELECTOR_SET.selectors[key])) {
+          if (typeof selector === 'string' && selector !== '' && rows.indexOf(selector) === -1) rows.push(selector);
+        }
+        merged.selectors[key] = rows;
+      }
+      return merged;
+    }
+
+    function loadCachedSelectors() {
+      const raw = readJson(SELECTORS_KEY, null);
+      if (raw === null || typeof raw !== 'object') return null;
+      const normalized = normalizeRemoteSelectors(
+        { version: raw.version, selectors: raw.selectors, keyAttribute: raw.keyAttribute },
+        SELECTOR_VERSION,
+      );
+      if (normalized === null) return null;
+      const fetchedAt = Number(raw.fetchedAt);
+      return {
+        ...normalized,
+        fetchedAt: Number.isFinite(fetchedAt) && fetchedAt > 0 ? fetchedAt : 0,
+        url: typeof raw.url === 'string' ? raw.url.slice(0, 500) : '',
+      };
+    }
+
+    function saveCachedSelectors(record) {
+      if (record === null || typeof record !== 'object') {
+        try {
+          window.localStorage.removeItem(SELECTORS_KEY);
+          return true;
+        } catch (error) {
+          return false;
+        }
+      }
+      return writeJson(SELECTORS_KEY, {
+        version: record.version,
+        selectors: record.selectors,
+        ...(record.keyAttribute === undefined ? {} : { keyAttribute: record.keyAttribute }),
+        fetchedAt: record.fetchedAt,
+        url: typeof record.url === 'string' ? record.url : '',
+      });
     }
 
     function loadHistory() {
@@ -467,6 +589,10 @@ window.__ModuleLoader__.load({
       'preview.format.summary': '结构化摘要',
       'preview.format.conclusion': '仅结论',
       'preview.template': '任务指令',
+      'preview.insertPosition': '插入位置',
+      'preview.insertEnd': '末尾',
+      'preview.insertCursor': '当前光标',
+      'preview.insertCursorUnavailable': '未检测到光标位置，将插入到草稿末尾',
       'preview.template.none': '只插入，不加指令',
       'preview.template.implement': '按此实现',
       'preview.template.planFirst': '先给计划',
@@ -532,6 +658,21 @@ window.__ModuleLoader__.load({
       'settings.idleHint': '释放后再次打开需要重新登录 DeepSeek 网页版。',
       'settings.autoSend': '允许在预览里选择「插入并发送」',
       'settings.autoSendHint': '关闭后只能插入为草稿，发送始终需要你手动确认。',
+      'settings.remoteSelectors': '远程选择器兜底',
+      'settings.remoteSelectorsHint': 'DeepSeek 改版后自动拉取最新的页面选择器，失败时回退本地内置，不发送任何用户数据。',
+      'settings.selectorUrl': '选择器配置地址',
+      'settings.selectorUrlHint': '指向 selectors.json 的 http(s) 地址，默认使用本插件仓库的 GitHub Raw 地址。',
+      'settings.selectorStatus': '选择器状态',
+      'settings.selectorStatusLocal': '使用本地内置选择器',
+      'settings.selectorStatusRemote': '使用远程选择器 v{version} · 更新于 {time}',
+      'settings.selectorStatusStale': '远程获取失败，沿用上次缓存 v{version} · {time}',
+      'settings.selectorStatusOff': '远程兜底已关闭，使用本地内置选择器',
+      'settings.selectorStatusFetching': '正在获取远程选择器…',
+      'settings.selectorStatusError': '远程获取失败，已回退本地内置选择器',
+      'settings.selectorStatusInvalid': '远程配置格式无效，已回退本地内置选择器',
+      'settings.selectorStatusNoHit': '远程选择器未命中当前页面，已回退本地内置选择器',
+      'settings.selectorRefresh': '立即刷新选择器',
+      'settings.selectorRefreshed': '已更新远程选择器',
       'settings.stats': '本地统计',
       'settings.statsBody': '打开 {open} 次 · 接力 {preview} 次 · 成功 {ok} 次 · 失败 {failed} 次 · 撤销 {undo} 次',
       'settings.copyStats': '复制统计',
@@ -724,6 +865,10 @@ window.__ModuleLoader__.load({
       'preview.format.summary': 'Structured summary',
       'preview.format.conclusion': 'Conclusion only',
       'preview.template': 'Task instruction',
+      'preview.insertPosition': 'Insert at',
+      'preview.insertEnd': 'End',
+      'preview.insertCursor': 'Cursor',
+      'preview.insertCursorUnavailable': 'No cursor position detected; content will be appended at the end',
       'preview.template.none': 'Insert only, no instruction',
       'preview.template.implement': 'Implement this',
       'preview.template.planFirst': 'Plan first',
@@ -789,6 +934,21 @@ window.__ModuleLoader__.load({
       'settings.idleHint': 'After release, opening the panel requires signing in to DeepSeek again.',
       'settings.autoSend': 'Allow "Insert & send" in the preview',
       'settings.autoSendHint': 'When off, handoffs are always inserted as drafts and you send manually.',
+      'settings.remoteSelectors': 'Remote selector fallback',
+      'settings.remoteSelectorsHint': 'Fetch the latest page selectors when DeepSeek ships a redesign; falls back to the built-in set and never sends user data.',
+      'settings.selectorUrl': 'Selector config URL',
+      'settings.selectorUrlHint': 'http(s) URL pointing at selectors.json; defaults to this repo\'s GitHub Raw file.',
+      'settings.selectorStatus': 'Selector status',
+      'settings.selectorStatusLocal': 'Using the built-in selectors',
+      'settings.selectorStatusRemote': 'Using remote selectors v{version} · updated {time}',
+      'settings.selectorStatusStale': 'Remote fetch failed; keeping the last cached v{version} · {time}',
+      'settings.selectorStatusOff': 'Remote fallback is off; using the built-in selectors',
+      'settings.selectorStatusFetching': 'Fetching remote selectors…',
+      'settings.selectorStatusError': 'Remote fetch failed; fell back to the built-in selectors',
+      'settings.selectorStatusInvalid': 'Remote config is invalid; fell back to the built-in selectors',
+      'settings.selectorStatusNoHit': 'Remote selectors did not match the page; fell back to the built-in selectors',
+      'settings.selectorRefresh': 'Refresh selectors now',
+      'settings.selectorRefreshed': 'Remote selectors updated',
       'settings.stats': 'Local stats',
       'settings.statsBody': '{open} opens · {preview} handoffs · {ok} succeeded · {failed} failed · {undo} undo',
       'settings.copyStats': 'Copy stats',
@@ -1678,6 +1838,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   font: inherit;
   font-size: 12px;
 }
+.dsh-dsc-input {
+  width: 220px;
+  height: 30px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 11px;
+}
+.dsh-dsc-input:disabled {
+  opacity: 0.55;
+}
 .dsh-dsc-textarea {
   width: 100%;
   min-height: 96px;
@@ -2259,7 +2434,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       );
     }
 
-    async function extractInGuest(mode, checkpoint) {
+    async function extractInGuest(mode, checkpoint, remote) {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const nextFrame = () =>
         new Promise((resolve) => {
@@ -2278,21 +2453,40 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             finish();
           }
         });
-      const SELECTORS = {
-        version: 1,
+      const BASE = {
         messages: ['[data-virtual-list-item-key]'],
         assistant: ['.ds-assistant-message-main-content'],
         think: ['.ds-think-content'],
       };
-      const pickSelector = (list) => {
-        for (const selector of list) {
-          if (document.querySelector(selector) !== null) return selector;
+      const remoteSelectors =
+        remote !== null && typeof remote === 'object' && remote.selectors !== null && typeof remote.selectors === 'object'
+          ? remote.selectors
+          : {};
+      const candidatesFor = (key) => {
+        const extra = Array.isArray(remoteSelectors[key])
+          ? remoteSelectors[key].filter((item) => typeof item === 'string' && item !== '')
+          : [];
+        const rows = [];
+        for (const selector of extra.concat(BASE[key])) {
+          if (rows.indexOf(selector) === -1) rows.push(selector);
         }
-        return list[0];
+        return rows;
       };
-      const ITEM = pickSelector(SELECTORS.messages);
-      const ASSISTANT = pickSelector(SELECTORS.assistant);
-      const THINK = pickSelector(SELECTORS.think);
+      const pickSelector = (list) => {
+        let firstValid = null;
+        for (const selector of list) {
+          try {
+            if (document.querySelector(selector) !== null) return selector;
+            if (firstValid === null) firstValid = selector;
+          } catch (error) {
+            /* Skip selectors the page cannot parse. */
+          }
+        }
+        return firstValid !== null ? firstValid : list[list.length - 1];
+      };
+      const ITEM = pickSelector(candidatesFor('messages'));
+      const ASSISTANT = pickSelector(candidatesFor('assistant'));
+      const THINK = pickSelector(candidatesFor('think'));
       const BLOCKS = new Set([
         'P', 'DIV', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'UL', 'OL', 'LI',
         'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE', 'TABLE', 'TR', 'HR',
@@ -2377,6 +2571,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         if (BLOCKS.has(tag)) return '\n' + out + '\n';
         return out;
       };
+      const KEY_ATTRIBUTE =
+        remote !== null &&
+        typeof remote === 'object' &&
+        typeof remote.keyAttribute === 'string' &&
+        /^data-[a-zA-Z0-9-]{1,48}$/.test(remote.keyAttribute)
+          ? remote.keyAttribute
+          : 'data-virtual-list-item-key';
       const readItem = (el) => {
         const assistant = el.querySelector(ASSISTANT) || null;
         if (assistant === null && (el.querySelector(THINK) || null) !== null) return null;
@@ -2425,7 +2626,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       };
       const capture = () => {
         for (const el of document.querySelectorAll(ITEM)) {
-          const key = el.getAttribute('data-virtual-list-item-key') || '';
+          const key = el.getAttribute(KEY_ATTRIBUTE) || '';
           const item = readItem(el);
           if (item === null) continue;
           const record = key === '' ? item : { key, role: item.role, text: item.text };
@@ -2528,7 +2729,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       };
     }
 
-    async function captureSegment(view, mode, checkpoint, timeoutMs) {
+    async function captureSegment(view, mode, checkpoint, timeoutMs, remote) {
       if (view === null || view === undefined || typeof view.executeJavaScript !== 'function') {
         throw new Error('handoff-unsupported');
       }
@@ -2536,8 +2737,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         checkpoint !== null && checkpoint !== undefined && typeof checkpoint === 'object'
           ? JSON.stringify(checkpoint)
           : 'null';
+      const remoteArg =
+        remote !== null && remote !== undefined && typeof remote === 'object' ? JSON.stringify(remote) : 'null';
       const source =
-        '(' + extractInGuest.toString() + ')(' + JSON.stringify(mode) + ', ' + checkpointArg + ')';
+        '(' + extractInGuest.toString() + ')(' + JSON.stringify(mode) + ', ' + checkpointArg + ', ' + remoteArg + ')';
       let timer = 0;
       try {
         const result = await Promise.race([
@@ -2645,12 +2848,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }
     }
 
-    function undoInsertedDraft(current, before, inserted) {
+    function undoInsertedDraft(current, before, inserted, offset, replaced) {
       const draft = typeof current === 'string' ? current : '';
       const base = typeof before === 'string' ? before : '';
       const block = typeof inserted === 'string' ? inserted : '';
       if (block === '') return { ok: false, reason: 'empty' };
       if (draft === base) return { ok: false, reason: 'missing' };
+      if (Number.isFinite(offset) && offset >= 0 && offset <= draft.length) {
+        if (draft.slice(offset, offset + block.length) === block) {
+          const restore = typeof replaced === 'string' ? replaced : '';
+          return { ok: true, text: draft.slice(0, offset) + restore + draft.slice(offset + block.length) };
+        }
+      }
       const exact = base + block;
       if (draft.startsWith(exact)) {
         return { ok: true, text: base + draft.slice(exact.length) };
@@ -2660,6 +2869,42 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         return { ok: true, text: draft.slice(0, first) + draft.slice(first + block.length) };
       }
       return { ok: false, reason: 'changed' };
+    }
+
+    function captureComposerInsertion(caret, sessionId) {
+      if (caret === null || typeof caret !== 'object') return null;
+      const element = caret.element;
+      if (element === null || element === undefined) return null;
+      if (element.isConnected === false) return null;
+      if (typeof element.value !== 'string') return null;
+      if (typeof sessionId !== 'string' || sessionId === '') return null;
+      const start = Number(caret.start);
+      const end = Number(caret.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+      const value = element.value;
+      const clampedStart = Math.max(0, Math.min(start, value.length));
+      const clampedEnd = Math.max(clampedStart, Math.min(Math.max(end, start), value.length));
+      return {
+        sessionId,
+        start: clampedStart,
+        end: clampedEnd,
+        anchor: value.slice(Math.max(0, clampedStart - 32), clampedStart),
+      };
+    }
+
+    function resolveInsertionPlan(existing, insertion) {
+      const draft = typeof existing === 'string' ? existing : '';
+      if (insertion === null || typeof insertion !== 'object') return { mode: 'end' };
+      const start = Number(insertion.start);
+      const end = Number(insertion.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) return { mode: 'end' };
+      if (start > draft.length) return { mode: 'end' };
+      const anchor = typeof insertion.anchor === 'string' ? insertion.anchor : '';
+      if (anchor !== '' && draft.slice(Math.max(0, start - anchor.length), start) !== anchor) {
+        return { mode: 'end' };
+      }
+      if (start >= draft.length) return { mode: 'end' };
+      return { mode: 'cursor', start, end: Math.min(end, draft.length) };
     }
 
     function selectHandoffMessages(messages, mode) {
@@ -2911,28 +3156,86 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }
     }
 
-    function probePageInGuest() {
-      const SELECTORS = {
-        version: 1,
+    function probePageInGuest(remote) {
+      const BASE = {
         messages: ['[data-virtual-list-item-key]'],
         assistant: ['.ds-assistant-message-main-content'],
         composer: ['textarea', '[contenteditable="true"]'],
       };
-      const pickSelector = (list) => {
-        for (const selector of list) {
-          if (document.querySelector(selector) !== null) return selector;
+      const remoteSelectors =
+        remote !== null && typeof remote === 'object' && remote.selectors !== null && typeof remote.selectors === 'object'
+          ? remote.selectors
+          : {};
+      const candidatesFor = (key) => {
+        const extra = Array.isArray(remoteSelectors[key])
+          ? remoteSelectors[key].filter((item) => typeof item === 'string' && item !== '')
+          : [];
+        const rows = [];
+        for (const selector of extra.concat(BASE[key])) {
+          if (rows.indexOf(selector) === -1) rows.push(selector);
         }
-        return list[0];
+        return rows;
       };
-      const messageSelector = pickSelector(SELECTORS.messages);
-      const assistantSelector = pickSelector(SELECTORS.assistant);
-      const composer = document.querySelector(SELECTORS.composer[0]) || document.querySelector(SELECTORS.composer[1]);
+      const pickWithSource = (key) => {
+        const remoteList = Array.isArray(remoteSelectors[key])
+          ? remoteSelectors[key].filter((item) => typeof item === 'string' && item !== '')
+          : [];
+        for (const selector of remoteList) {
+          try {
+            if (document.querySelector(selector) !== null) return { selector, source: 'remote' };
+          } catch (error) {
+            /* Skip selectors the page cannot parse. */
+          }
+        }
+        for (const selector of BASE[key]) {
+          try {
+            if (document.querySelector(selector) !== null) return { selector, source: 'local' };
+          } catch (error) {
+            /* Skip selectors the page cannot parse. */
+          }
+        }
+        return { selector: remoteList.length > 0 ? remoteList[0] : BASE[key][0], source: 'none' };
+      };
+      const messagesPick = pickWithSource('messages');
+      const messageSelector = messagesPick.selector;
+      const assistantSelector = pickWithSource('assistant').selector;
+      const composer =
+        (() => {
+          for (const selector of candidatesFor('composer')) {
+            try {
+              const found = document.querySelector(selector);
+              if (found !== null) return found;
+            } catch (error) {
+              /* Skip selectors the page cannot parse. */
+            }
+          }
+          return null;
+        })() ||
+        (() => {
+          try {
+            return document.querySelector(BASE.composer[0]) || document.querySelector(BASE.composer[1]);
+          } catch (error) {
+            return null;
+          }
+        })();
       const draftText =
         composer === null || composer === undefined
           ? ''
           : String(composer.value !== undefined && composer.value !== null ? composer.value : composer.innerText || '');
-      const items = document.querySelectorAll(messageSelector);
-      const assistants = document.querySelectorAll(assistantSelector);
+      const items = (() => {
+        try {
+          return document.querySelectorAll(messageSelector);
+        } catch (error) {
+          return [];
+        }
+      })();
+      const assistants = (() => {
+        try {
+          return document.querySelectorAll(assistantSelector);
+        } catch (error) {
+          return [];
+        }
+      })();
       const body = document.body;
       const text =
         body !== null && body !== undefined && typeof body.innerText === 'string' ? body.innerText.slice(0, 4000) : '';
@@ -2946,7 +3249,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         url: typeof location !== 'undefined' && typeof location.href === 'string' ? location.href : '',
         count: items.length,
         assistants: assistants.length,
-        selectorVersion: SELECTORS.version,
+        selectorVersion:
+          remote !== null && typeof remote === 'object' && Number.isFinite(remote.version)
+            ? remote.version
+            : SELECTOR_VERSION,
+        selectorSource: messagesPick.source === 'remote' || messagesPick.source === 'local' ? messagesPick.source : 'none',
         selectors: {
           messages: items.length > 0,
           assistant: assistants.length > 0,
@@ -2956,12 +3263,53 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       };
     }
 
-    async function probePage(view) {
+    async function probePage(view, remote) {
       if (view === null || view === undefined || typeof view.executeJavaScript !== 'function') return null;
       let timer = 0;
       try {
+        const remoteArg = remote !== null && remote !== undefined && typeof remote === 'object' ? JSON.stringify(remote) : 'null';
         const result = await Promise.race([
-          view.executeJavaScript('(' + probePageInGuest.toString() + ')()', true),
+          view.executeJavaScript('(' + probePageInGuest.toString() + ')(' + remoteArg + ')', true),
+          new Promise((resolve) => {
+            timer = window.setTimeout(() => resolve(null), 5000);
+          }),
+        ]);
+        return result !== null && typeof result === 'object' ? result : null;
+      } catch (error) {
+        return null;
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+
+    function probeSelectorsInGuest(remote) {
+      const remoteSelectors =
+        remote !== null && typeof remote === 'object' && remote.selectors !== null && typeof remote.selectors === 'object'
+          ? remote.selectors
+          : {};
+      const hits = {};
+      for (const key of ['messages', 'assistant', 'think', 'composer']) {
+        const list = Array.isArray(remoteSelectors[key])
+          ? remoteSelectors[key].filter((item) => typeof item === 'string' && item !== '')
+          : [];
+        hits[key] = list.some((selector) => {
+          try {
+            return document.querySelector(selector) !== null;
+          } catch (error) {
+            return false;
+          }
+        });
+      }
+      return hits;
+    }
+
+    async function probeSelectors(view, remote) {
+      if (view === null || view === undefined || typeof view.executeJavaScript !== 'function') return null;
+      let timer = 0;
+      try {
+        const remoteArg = remote !== null && remote !== undefined && typeof remote === 'object' ? JSON.stringify(remote) : 'null';
+        const result = await Promise.race([
+          view.executeJavaScript('(' + probeSelectorsInGuest.toString() + ')(' + remoteArg + ')', true),
           new Promise((resolve) => {
             timer = window.setTimeout(() => resolve(null), 5000);
           }),
@@ -2975,6 +3323,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
     }
 
     function buildDiagnostics(page, extra) {
+      const cachedSelectors = loadCachedSelectors();
+      const settings = loadSettings();
+      const candidates = selectorCandidateSet(cachedSelectors);
       const payload = {
         plugin: '@local/dsh-deepseek-web-chat',
         version: PLUGIN_VERSION,
@@ -2982,6 +3333,16 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           page !== null && typeof page === 'object' && Number.isFinite(page.selectorVersion)
             ? page.selectorVersion
             : SELECTOR_VERSION,
+        selectorSource: page !== null && typeof page === 'object' ? page.selectorSource : undefined,
+        selectorFallback: {
+          enabled: settings.remoteSelectors,
+          url: cachedSelectors !== null && cachedSelectors.url !== '' ? cachedSelectors.url : settings.selectorUrl,
+          cachedVersion: cachedSelectors === null ? null : cachedSelectors.version,
+          fetchedAt: cachedSelectors === null ? null : new Date(cachedSelectors.fetchedAt || 0).toISOString(),
+          candidateCounts: Object.fromEntries(
+            SELECTOR_KEYS.map((key) => [key, candidates.selectors[key].length]),
+          ),
+        },
         time: new Date().toISOString(),
         stage: extra !== null && typeof extra === 'object' && typeof extra.stage === 'string' ? extra.stage : 'manual',
         auth: page !== null && typeof page === 'object' ? page.auth : 'unknown',
@@ -2989,16 +3350,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         titleLength: page !== null && typeof page === 'object' && typeof page.title === 'string' ? page.title.length : 0,
         selectors: page !== null && typeof page === 'object' ? page.selectors : null,
         counts: page !== null && typeof page === 'object' ? { messages: page.count, assistants: page.assistants } : null,
-        settings: (() => {
-          const settings = loadSettings();
-          return {
-            defaultMode: settings.defaultMode,
-            defaultFormat: settings.defaultFormat,
-            safety: settings.safety,
-            notify: settings.notify,
-            idleMinutes: settings.idleMinutes,
-          };
-        })(),
+        settings: {
+          defaultMode: settings.defaultMode,
+          defaultFormat: settings.defaultFormat,
+          safety: settings.safety,
+          notify: settings.notify,
+          idleMinutes: settings.idleMinutes,
+        },
         metrics: loadMetrics().counts,
         note: 'No conversation content, file paths or account information is included.',
       };
@@ -3058,26 +3416,125 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return true;
     }
 
-    function observeCompletionInGuest() {
+    function installEscBridgeInGuest() {
+      if (window.__DSH_DSC_ESC_BRIDGE__ === true) return true;
+      window.__DSH_DSC_ESC_BRIDGE__ = true;
+      let lastSent = 0;
+      const insidePageDialog = (node) => {
+        for (let el = node; el !== null && el !== undefined; el = el.parentElement) {
+          if (typeof el.getAttribute !== 'function') continue;
+          if (el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true') return true;
+        }
+        return false;
+      };
+      document.addEventListener(
+        'keydown',
+        (event) => {
+          if (event.key !== 'Escape') return;
+          // Let the page consume Escape first (its own dialogs, pickers…).
+          if (event.defaultPrevented) return;
+          if (insidePageDialog(event.target)) return;
+          const now = Date.now();
+          if (now - lastSent < 400) return;
+          lastSent = now;
+          try {
+            console.log('__DSH_DSC_ESC__{}');
+          } catch (error) {
+            /* Esc forwarding is best effort; the toolbar close stays as fallback. */
+          }
+        },
+        false,
+      );
+      return true;
+    }
+
+    function observeCompletionInGuest(remote) {
+      // Candidates are kept on the window so a later re-injection with newer
+      // remote selectors updates the running observer without duplicating it.
+      const remoteSelectors =
+        remote !== null && typeof remote === 'object' && remote.selectors !== null && typeof remote.selectors === 'object'
+          ? remote.selectors
+          : {};
+      const assistantCandidates = (() => {
+        const extra = Array.isArray(remoteSelectors.assistant)
+          ? remoteSelectors.assistant.filter((item) => typeof item === 'string' && item !== '')
+          : [];
+        const rows = [];
+        for (const selector of extra.concat(['.ds-assistant-message-main-content'])) {
+          if (rows.indexOf(selector) === -1) rows.push(selector);
+        }
+        return rows;
+      })();
+      const composerCandidates = (() => {
+        const extra = Array.isArray(remoteSelectors.composer)
+          ? remoteSelectors.composer.filter((item) => typeof item === 'string' && item !== '')
+          : [];
+        const rows = [];
+        for (const selector of extra.concat(['textarea', '[contenteditable="true"]'])) {
+          if (rows.indexOf(selector) === -1) rows.push(selector);
+        }
+        return rows;
+      })();
+      window.__DSH_DSC_SELECTORS__ = { assistant: assistantCandidates, composer: composerCandidates };
       if (window.__DSH_DSC_OBSERVER__ === true) return true;
       window.__DSH_DSC_OBSERVER__ = true;
       let lastText = '';
       let lastChange = Date.now();
       let notified = '';
       let lastTitle = '';
-      const assistantSelectors = ['.ds-assistant-message-main-content'];
-      const assistantSelector =
-        assistantSelectors.find((selector) => document.querySelector(selector) !== null) || assistantSelectors[0];
+      const liveAssistantCandidates = () => {
+        const stored = window.__DSH_DSC_SELECTORS__;
+        if (stored !== null && typeof stored === 'object' && Array.isArray(stored.assistant)) {
+          return stored.assistant.filter((item) => typeof item === 'string' && item !== '');
+        }
+        return ['.ds-assistant-message-main-content'];
+      };
+      const liveAssistantSelector = () => {
+        const list = liveAssistantCandidates();
+        for (const selector of list) {
+          try {
+            if (document.querySelector(selector) !== null) return selector;
+          } catch (error) {
+            /* Skip selectors the page cannot parse. */
+          }
+        }
+        return list[list.length - 1];
+      };
       const read = () => {
-        const nodes = document.querySelectorAll(assistantSelector);
+        const nodes = document.querySelectorAll(liveAssistantSelector());
         const last = nodes[nodes.length - 1];
         return last !== undefined && last !== null ? String(last.innerText || '') : '';
       };
+      const liveComposerSelector = () => {
+        const stored = window.__DSH_DSC_SELECTORS__;
+        const list =
+          stored !== null && typeof stored === 'object' && Array.isArray(stored.composer)
+            ? stored.composer.filter((item) => typeof item === 'string' && item !== '')
+            : [];
+        const candidates = list.length > 0 ? list : ['textarea', '[contenteditable="true"]'];
+        for (const selector of candidates) {
+          try {
+            if (document.querySelector(selector) !== null) return selector;
+          } catch (error) {
+            /* Skip selectors the page cannot parse. */
+          }
+        }
+        return candidates[candidates.length - 1];
+      };
       const readDraft = () => {
-        const field = document.querySelector('textarea');
-        if (field !== null) return String(field.value || '');
-        const editable = document.querySelector('[contenteditable="true"]');
-        return editable !== null ? String(editable.innerText || '') : '';
+        const selector = liveComposerSelector();
+        const field = (() => {
+          try {
+            return document.querySelector(selector);
+          } catch (error) {
+            return null;
+          }
+        })();
+        if (field !== null && field !== undefined) {
+          if (typeof field.value === 'string') return field.value;
+          return String(field.innerText || '');
+        }
+        return '';
       };
       const sendDraft = (value) => {
         try {
@@ -3331,7 +3788,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             return false;
           }
         },
-        deliver(text, targetSessionId) {
+        deliver(text, targetSessionId, insertion) {
           const sessionId =
             targetSessionId === undefined || targetSessionId === null || targetSessionId === ''
               ? currentSessionId(ctx)
@@ -3342,6 +3799,58 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           const shell = shellFor(sessionId);
           if (shell === null || shell.actions === undefined) return { ok: false, reason: 'no-composer' };
           const actions = shell.actions;
+          const plan =
+            insertion !== null &&
+            insertion !== undefined &&
+            typeof insertion === 'object' &&
+            typeof insertion.sessionId === 'string' &&
+            insertion.sessionId === sessionId
+              ? resolveInsertionPlan(draftOf(shell), insertion)
+              : { mode: 'end' };
+          if (plan.mode === 'cursor') {
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+              try {
+                const current = draftOf(shell);
+                const existing = current === undefined ? '' : current;
+                const span = { start: plan.start, end: plan.end, draftRev: shell.rev };
+                if (actions.insertText(text, span)) {
+                  return {
+                    ok: true,
+                    mode: 'insert',
+                    position: 'cursor',
+                    sessionId,
+                    before: existing,
+                    inserted: text,
+                    offset: plan.start,
+                    replaced: existing.slice(plan.start, plan.end),
+                    at: Date.now(),
+                  };
+                }
+              } catch (error) {
+                console.warn('DeepSeek chat: handoff insert failed', error);
+              }
+            }
+            try {
+              const current = draftOf(shell);
+              const existing = current === undefined ? '' : current;
+              const next = existing.slice(0, plan.start) + text + existing.slice(plan.end);
+              actions.setDraft(next);
+              return {
+                ok: true,
+                mode: 'setDraft',
+                position: 'cursor',
+                sessionId,
+                before: existing,
+                inserted: text,
+                offset: plan.start,
+                replaced: existing.slice(plan.start, plan.end),
+                at: Date.now(),
+              };
+            } catch (error) {
+              console.warn('DeepSeek chat: handoff setDraft failed', error);
+            }
+            return { ok: false, reason: 'failed' };
+          }
           for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
               const current = draftOf(shell);
@@ -3354,9 +3863,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 return {
                   ok: true,
                   mode: 'insert',
+                  position: 'end',
                   sessionId,
                   before: existing,
                   inserted,
+                  offset: existing.length,
                   at: Date.now(),
                 };
               }
@@ -3372,9 +3883,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             return {
               ok: true,
               mode: 'setDraft',
+              position: 'end',
               sessionId,
               before: existing,
               inserted,
+              offset: existing.length,
               at: Date.now(),
             };
           } catch (error) {
@@ -3398,7 +3911,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           }
           const shell = shellFor(record.sessionId);
           if (shell === null || shell.actions === undefined) return { ok: false, reason: 'no-composer' };
-          const result = undoInsertedDraft(draftOf(shell), record.before, record.inserted);
+          const result = undoInsertedDraft(draftOf(shell), record.before, record.inserted, record.offset, record.replaced);
           if (!result.ok) return result;
           try {
             shell.actions.setDraft(result.text);
@@ -3490,6 +4003,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [reverseText, setReverseText] = React.useState('');
       const [health, setHealth] = React.useState(null);
       const [healthDismissed, setHealthDismissed] = React.useState(false);
+      const [selectorMeta, setSelectorMeta] = React.useState({ status: 'idle' });
+      const remoteSelectorsRef = React.useRef(null);
+      const selectorsFetchedAtRef = React.useRef(0);
+      const selectorFailureRetryRef = React.useRef(0);
       const [dockDragging, setDockDragging] = React.useState(false);
       const [quick, setQuick] = React.useState(false);
       const [quickRect, setQuickRect] = React.useState(null);
@@ -3514,7 +4031,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const openRef = React.useRef(null);
       const handleReplyDoneRef = React.useRef(null);
       const handleTitleRef = React.useRef(null);
+      const handleEscRef = React.useRef(null);
       const lastSelectionRef = React.useRef('');
+      const lastCaretRef = React.useRef(null);
       const previousActiveRef = React.useRef(active);
       const visible = opened && (embedded ? tabVisible !== false : active || docked || quick);
       const visibleRef = React.useRef(visible);
@@ -3539,6 +4058,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       React.useEffect(() => {
         visibleRef.current = visible;
       }, [visible]);
+
+      React.useEffect(() => {
+        // Load the validated remote selector cache once per mount; captures
+        // merge it ahead of the built-in set with the local set as fallback.
+        remoteSelectorsRef.current = loadCachedSelectors();
+      }, []);
 
       // In the native right sidebar the panel sits under the dockkit tab strip.
       // Size the bar so its bottom divider lands on the conversation header's
@@ -3602,6 +4127,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       React.useEffect(() => {
         const onSelectionChange = () => {
           try {
+            // Track the composer caret so a handoff can insert at the cursor.
+            const active = document.activeElement;
+            if (
+              active !== null &&
+              active !== document.body &&
+              (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT') &&
+              typeof active.selectionStart === 'number' &&
+              typeof active.selectionEnd === 'number'
+            ) {
+              const value = String(active.value || '');
+              const start = Math.max(0, Math.min(active.selectionStart, value.length));
+              lastCaretRef.current = {
+                element: active,
+                start,
+                end: Math.max(start, Math.min(active.selectionEnd, value.length)),
+              };
+            }
             const selection = window.getSelection();
             if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) return;
             const text = selection.toString().trim();
@@ -3745,6 +4287,112 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       handleTitleRef.current = (title) => {
         setPanelTitle(cleanPageTitle(title));
       };
+
+      const refreshSelectors = React.useCallback(async (force) => {
+        const settingsNow = settingsRef.current;
+        if (settingsNow.remoteSelectors !== true) {
+          remoteSelectorsRef.current = null;
+          setSelectorMeta({ status: 'off' });
+          return 'off';
+        }
+        const now = Date.now();
+        if (!force && now - selectorsFetchedAtRef.current < SELECTORS_TTL_MS) return 'throttled';
+        selectorsFetchedAtRef.current = now;
+        setSelectorMeta({ status: 'fetching' });
+        const url = settingsNow.selectorUrl;
+        let payload = null;
+        try {
+          const controller = typeof AbortController === 'function' ? new AbortController() : null;
+          const timer =
+            controller !== null
+              ? window.setTimeout(() => {
+                  try {
+                    controller.abort();
+                  } catch (error) {
+                    /* Abort is best effort. */
+                  }
+                }, SELECTORS_FETCH_TIMEOUT_MS)
+              : 0;
+          try {
+            const response = await fetch(url, {
+              signal: controller !== null ? controller.signal : undefined,
+              cache: 'no-store',
+            });
+            if (response.ok !== true) throw new Error('http-' + response.status);
+            payload = await response.json();
+          } finally {
+            if (timer !== 0) window.clearTimeout(timer);
+          }
+        } catch (error) {
+          const cached = loadCachedSelectors();
+          remoteSelectorsRef.current = cached;
+          if (cached !== null) {
+            setSelectorMeta({
+              status: 'stale',
+              version: cached.version,
+              fetchedAt: cached.fetchedAt,
+              url,
+              error: String((error && error.message) || error),
+            });
+            track('dsc_selector_fetch', { ok: false, reason: 'stale' });
+            return 'stale';
+          }
+          setSelectorMeta({ status: 'error', url, error: String((error && error.message) || error) });
+          track('dsc_selector_fetch', { ok: false });
+          return 'error';
+        }
+        const normalized = normalizeRemoteSelectors(payload, SELECTOR_VERSION);
+        if (normalized === null) {
+          setSelectorMeta({ status: 'invalid', url });
+          track('dsc_selector_fetch', { ok: false, reason: 'invalid' });
+          return 'invalid';
+        }
+        const view = viewRef.current;
+        const hits =
+          view !== null && view !== undefined && typeof view.executeJavaScript === 'function'
+            ? await probeSelectors(view, normalized)
+            : null;
+        if (hits === null) {
+          // No live page to validate against yet; keep the local set for now.
+          setSelectorMeta({ status: 'idle', version: normalized.version, url });
+          return 'deferred';
+        }
+        if (hits.messages !== true && hits.composer !== true && hits.assistant !== true) {
+          setSelectorMeta({ status: 'no-hit', version: normalized.version, url });
+          track('dsc_selector_fetch', { ok: false, reason: 'no-hit' });
+          return 'no-hit';
+        }
+        const record = { ...normalized, fetchedAt: Date.now(), url };
+        saveCachedSelectors(record);
+        remoteSelectorsRef.current = record;
+        setSelectorMeta({ status: 'remote', version: record.version, fetchedAt: record.fetchedAt, url });
+        // Re-running the observer installer refreshes the live selector set
+        // (it updates window.__DSH_DSC_SELECTORS__ without duplicating itself).
+        const liveView = viewRef.current;
+        if (liveView !== null && liveView !== undefined && typeof liveView.executeJavaScript === 'function') {
+          try {
+            const reinject = liveView.executeJavaScript(
+              '(' + observeCompletionInGuest.toString() + ')(' + JSON.stringify(record) + ')',
+              false,
+            );
+            if (reinject !== undefined && typeof reinject.catch === 'function') {
+              reinject.catch(() => {});
+            }
+          } catch (error) {
+            /* Observer refresh is best effort; the next page load reinstalls it. */
+          }
+        }
+        track('dsc_selector_fetch', { ok: true });
+        return 'remote';
+      }, []);
+
+      const maybeRefreshAfterFailure = React.useCallback(() => {
+        if (settingsRef.current.remoteSelectors !== true) return;
+        const now = Date.now();
+        if (now - selectorFailureRetryRef.current < SELECTORS_RETRY_MS) return;
+        selectorFailureRetryRef.current = now;
+        void refreshSelectors(true);
+      }, [refreshSelectors]);
 
       const handoffErrorText = React.useCallback(
         (reason) => {
@@ -3988,7 +4636,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           let delivered = { ok: false, reason: 'failed' };
           if (delivery !== null && delivery !== undefined && typeof delivery.deliver === 'function') {
             try {
-              delivered = delivery.deliver(payload.text, payload.targetSessionId);
+              delivered = delivery.deliver(
+                payload.text,
+                payload.targetSessionId,
+                payload.insertPosition === 'cursor' ? payload.insertion : null,
+              );
             } catch (cause) {
               console.warn('DeepSeek chat: handoff delivery failed', cause);
             }
@@ -4000,6 +4652,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             chars: payload.chars,
             tokens,
             truncated: payload.truncated === true,
+            position: delivered !== null && delivered.position === 'cursor' ? 'cursor' : 'end',
           });
           if (template !== 'none') track('dsc_template_use', {});
           if (delivered !== null && delivered.ok === true) {
@@ -4120,12 +4773,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           setElapsed(0);
           try {
             progressBaseRef.current = 0;
-            let result = await captureSegment(view, mode, null, SEGMENT_TIMEOUT);
+            let result = await captureSegment(view, mode, null, SEGMENT_TIMEOUT, remoteSelectorsRef.current);
             if (result.ok !== true) {
-              void probePage(view).then((page) => {
+              void probePage(view, remoteSelectorsRef.current).then((page) => {
                 if (page === null) return;
                 setHealth({ ...page, ok: false });
                 setHealthDismissed(false);
+                maybeRefreshAfterFailure();
               });
               showToast(handoffErrorText(result.reason || 'failed'));
               return;
@@ -4137,7 +4791,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             let segments = 1;
             while (mode !== 'all' && mode !== 'selection' && !done && segments < 3) {
               progressBaseRef.current = captured.length;
-              result = await captureSegment(view, mode, checkpoint, SEGMENT_TIMEOUT);
+              result = await captureSegment(view, mode, checkpoint, SEGMENT_TIMEOUT, remoteSelectorsRef.current);
               if (result.ok !== true) throw new Error(result.reason || 'handoff-failed');
               captured = mergeCapturedMessages(captured, result.messages);
               checkpoint = result.checkpoint === undefined ? checkpoint : result.checkpoint;
@@ -4161,6 +4815,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 : undefined;
             const targetSessionId = targets.length > 0 ? targets[0].id : current;
             const defaults = settingsRef.current;
+            const insertion =
+              current !== undefined && current !== null && current !== ''
+                ? captureComposerInsertion(lastCaretRef.current, current)
+                : null;
             setHistory(loadHistory());
             setPreview({
               mode,
@@ -4186,15 +4844,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               showText: false,
               returnToHarness: defaults.returnToHarness,
               autoSend: defaults.autoSend,
+              insertPosition: 'end',
+              insertion,
             });
             track('dsc_handoff_preview', { duration_ms: Math.max(0, Date.now() - startedAt) });
           } catch (cause) {
             const reason = cause instanceof Error && cause.message === 'handoff-timeout' ? 'timeout' : 'failed';
             track('dsc_error', {});
-            void probePage(view).then((page) => {
+            void probePage(view, remoteSelectorsRef.current).then((page) => {
               if (page === null) return;
               setHealth({ ...page, ok: false });
               setHealthDismissed(false);
+              maybeRefreshAfterFailure();
             });
             showToast(handoffErrorText(reason));
           } finally {
@@ -4204,7 +4865,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             progressBaseRef.current = 0;
           }
         },
-        [busy, onboarding, dismissOnboarding, phase, showToast, handoffErrorText, delivery, listTargets, t],
+        [busy, onboarding, dismissOnboarding, phase, showToast, handoffErrorText, delivery, listTargets, t, maybeRefreshAfterFailure],
       );
 
       const continueCapture = React.useCallback(async () => {
@@ -4222,7 +4883,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         setElapsed(0);
         progressBaseRef.current = preview.messages.length;
         try {
-          const result = await captureSegment(view, preview.mode, checkpoint, 20000);
+          const result = await captureSegment(view, preview.mode, checkpoint, 20000, remoteSelectorsRef.current);
           if (result.ok !== true) {
             showToast(handoffErrorText(result.reason || 'failed'));
             return;
@@ -4276,22 +4937,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
       React.useEffect(() => {
         if (!visible) return undefined;
-        const onKeyDown = (event) => {
-          const mod = event.metaKey || event.ctrlKey;
-          if (mod && event.shiftKey && !event.altKey) {
-            if (event.key === 'd' || event.key === 'D') {
-              event.preventDefault();
-              toggleRef.current?.();
-              return;
-            }
-            if (event.key === 'e' || event.key === 'E') {
-              event.preventDefault();
-              requestHandoffRef.current?.();
-              return;
-            }
-          }
-          if (event.key !== 'Escape' || event.defaultPrevented) return;
-          event.preventDefault();
+        let lastEscapeAt = 0;
+        const escapeAction = () => {
+          // The host window and the guest Esc bridge never see the same key
+          // press, but a short guard keeps double handling impossible.
+          const now = Date.now();
+          if (now - lastEscapeAt < 250) return;
+          lastEscapeAt = now;
           if (menuOpen) {
             setMenuOpen(false);
             return;
@@ -4338,8 +4990,30 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           }
           back();
         };
+        const onKeyDown = (event) => {
+          const mod = event.metaKey || event.ctrlKey;
+          if (mod && event.shiftKey && !event.altKey) {
+            if (event.key === 'd' || event.key === 'D') {
+              event.preventDefault();
+              toggleRef.current?.();
+              return;
+            }
+            if (event.key === 'e' || event.key === 'E') {
+              event.preventDefault();
+              requestHandoffRef.current?.();
+              return;
+            }
+          }
+          if (event.key !== 'Escape' || event.defaultPrevented) return;
+          event.preventDefault();
+          escapeAction();
+        };
+        handleEscRef.current = escapeAction;
         window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
+        return () => {
+          handleEscRef.current = null;
+          window.removeEventListener('keydown', onKeyDown);
+        };
       }, [
         visible,
         back,
@@ -4515,16 +5189,28 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           const target = element;
           window.setTimeout(() => {
             if (disposed || target === null) return;
-            void probePage(target).then((page) => {
+            void probePage(target, remoteSelectorsRef.current).then((page) => {
               if (disposed || page === null) return;
               setAuthState(page.auth === 'in' || page.auth === 'out' ? page.auth : 'unknown');
               setHealth(page);
+              if (page.ok !== true && page.selectors !== null) {
+                // The page loaded but no selector matched: try a fresh remote set.
+                maybeRefreshAfterFailure();
+              }
             });
+            if (!disposed) void refreshSelectors(false);
           }, 1800);
           window.setTimeout(() => {
             if (disposed || target === null) return;
+            const remoteArg =
+              remoteSelectorsRef.current === null || remoteSelectorsRef.current === undefined
+                ? ''
+                : JSON.stringify(remoteSelectorsRef.current);
             try {
-              const loading = target.executeJavaScript('(' + observeCompletionInGuest.toString() + ')()', false);
+              const loading = target.executeJavaScript(
+                '(' + observeCompletionInGuest.toString() + ')(' + remoteArg + ')',
+                false,
+              );
               if (loading !== undefined && typeof loading.catch === 'function') {
                 loading.catch(() => {});
               }
@@ -4538,6 +5224,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               }
             } catch (error) {
               /* Link interception is best effort. */
+            }
+            try {
+              const escBridge = target.executeJavaScript('(' + installEscBridgeInGuest.toString() + ')()', false);
+              if (escBridge !== undefined && typeof escBridge.catch === 'function') {
+                escBridge.catch(() => {});
+              }
+            } catch (error) {
+              /* Esc bridging is best effort. */
             }
           }, 1200);
         };
@@ -4584,6 +5278,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             } catch (error) {
               /* Malformed draft messages are ignored. */
             }
+          }
+          if (message.startsWith('__DSH_DSC_ESC__')) {
+            handleEscRef.current?.();
           }
           if (message.startsWith('__DSH_DSC_LINK__')) {
             try {
@@ -4745,6 +5442,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const previewFormat = preview === null || !HANDOFF_FORMATS.includes(preview.format) ? 'raw' : preview.format;
       const previewTemplate =
         preview === null || !HANDOFF_TEMPLATES.includes(preview.template) ? 'none' : preview.template;
+      const previewInsertPosition = preview === null ? 'end' : preview.insertPosition === 'cursor' ? 'cursor' : 'end';
       const previewText =
         preview === null || previewSelected.length === 0
           ? ''
@@ -4785,6 +5483,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           truncated: preview.truncated === true,
           messages: previewSelected.map((message) => ({ role: message.role, text: message.text })),
           hash: previewHash,
+          insertPosition: previewInsertPosition === 'cursor' && preview.insertion ? 'cursor' : 'end',
+          insertion: preview.insertion === undefined || preview.insertion === null ? null : preview.insertion,
         });
       }, [
         preview,
@@ -4881,7 +5581,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
       const runDiagnostics = React.useCallback(async () => {
         setMenuOpen(false);
-        const page = await probePage(viewRef.current);
+        const page = await probePage(viewRef.current, remoteSelectorsRef.current);
         if (page === null || page === undefined) {
           showToast(t('toast.noDiagnostics'));
           return;
@@ -4918,7 +5618,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           showToast(t('draft.failed'));
           return;
         }
-        const page = await probePage(view);
+        const page = await probePage(view, remoteSelectorsRef.current);
         if (page === null || page.auth === 'out') {
           showToast(t('draft.failed'));
           return;
@@ -4953,7 +5653,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }, [showToast, t]);
 
       const reportIssue = React.useCallback(async () => {
-        const page = await probePage(viewRef.current);
+        const page = await probePage(viewRef.current, remoteSelectorsRef.current);
         const diagnostics = buildDiagnostics(page, { stage: 'feedback' });
         const url = new URL(REPO_URL + '/issues/new');
         url.searchParams.set('title', '[DeepSeek Chat] ');
@@ -5015,6 +5715,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             showText: false,
             returnToHarness: settingsRef.current.returnToHarness,
             autoSend: false,
+            insertPosition: 'end',
+            insertion: null,
           });
         },
         [delivery, listTargets],
@@ -5236,6 +5938,42 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                           h('option', { key: template, value: template }, t('preview.template.' + template)),
                         ),
                       ),
+                    ),
+                    h(
+                      'div',
+                      { className: 'dsh-dsc-preview-line' },
+                      h('span', null, t('preview.insertPosition')),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-dsc-chip',
+                          'data-active': previewInsertPosition === 'cursor' ? undefined : 'true',
+                          onClick: () =>
+                            setPreview((current) =>
+                              current === null ? current : { ...current, insertPosition: 'end' },
+                            ),
+                        },
+                        t('preview.insertEnd'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-dsc-chip',
+                          'data-active': previewInsertPosition === 'cursor' ? 'true' : undefined,
+                          disabled: !preview.insertion,
+                          title: preview.insertion ? undefined : t('preview.insertCursorUnavailable'),
+                          onClick: () =>
+                            setPreview((current) =>
+                              current === null ? current : { ...current, insertPosition: 'cursor' },
+                            ),
+                        },
+                        t('preview.insertCursor'),
+                      ),
+                      preview.insertion
+                        ? null
+                        : h('small', { className: 'dsh-dsc-preview-warn' }, t('preview.insertCursorUnavailable')),
                     ),
                     dedupeMatch === undefined
                       ? null
@@ -5498,6 +6236,32 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             },
           }),
         );
+      const selectorStatusTextFor = (status) => {
+        if (settings.remoteSelectors !== true) return t('settings.selectorStatusOff');
+        switch (status) {
+          case 'fetching':
+            return t('settings.selectorStatusFetching');
+          case 'remote':
+            return t('settings.selectorStatusRemote', {
+              version: String(selectorMeta.version === undefined ? '' : selectorMeta.version),
+              time: formatStamp(new Date(selectorMeta.fetchedAt === undefined ? Date.now() : selectorMeta.fetchedAt)),
+            });
+          case 'stale':
+            return t('settings.selectorStatusStale', {
+              version: String(selectorMeta.version === undefined ? '' : selectorMeta.version),
+              time: formatStamp(new Date(selectorMeta.fetchedAt === undefined ? Date.now() : selectorMeta.fetchedAt)),
+            });
+          case 'error':
+            return t('settings.selectorStatusError');
+          case 'invalid':
+            return t('settings.selectorStatusInvalid');
+          case 'no-hit':
+            return t('settings.selectorStatusNoHit');
+          default:
+            return t('settings.selectorStatusLocal');
+        }
+      };
+      const selectorStatusText = selectorStatusTextFor(selectorMeta.status);
       const settingsNode = settingsOpen
         ? h(
             'div',
@@ -5560,6 +6324,30 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               settingsCheck('notify', 'settings.notify', null),
               settingsCheck('dedupe', 'settings.dedupe', null),
               settingsCheck('autoSend', 'settings.autoSend', 'settings.autoSendHint'),
+              settingsCheck('remoteSelectors', 'settings.remoteSelectors', 'settings.remoteSelectorsHint'),
+              settingsRow(
+                'settings.selectorUrl',
+                'settings.selectorUrlHint',
+                h('input', {
+                  className: 'dsh-dsc-input',
+                  type: 'url',
+                  spellCheck: false,
+                  defaultValue: settings.selectorUrl,
+                  disabled: settings.remoteSelectors !== true,
+                  onBlur: (event) => {
+                    const value = String(event.target.value || '').trim();
+                    if (/^https?:\/\/\S+$/i.test(value) && value.length <= 500 && value !== settings.selectorUrl) {
+                      updateSetting('selectorUrl', value);
+                    }
+                  },
+                }),
+              ),
+              h(
+                'p',
+                { className: 'dsh-dsc-text' },
+                h('strong', null, t('settings.selectorStatus') + '：'),
+                selectorStatusText,
+              ),
               settingsRow(
                 'settings.idle',
                 'settings.idleHint',
@@ -5595,6 +6383,26 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 'div',
                 { className: 'dsh-dsc-footer-actions' },
                 h('button', { type: 'button', className: 'dsh-dsc-button', onClick: () => void reportIssue() }, t('settings.reportIssue')),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-button',
+                    disabled: settings.remoteSelectors !== true || selectorMeta.status === 'fetching',
+                    onClick: () => {
+                      void refreshSelectors(true).then((status) => {
+                        showToast(
+                          status === 'remote'
+                            ? t('settings.selectorRefreshed')
+                            : status === 'off'
+                              ? t('settings.selectorStatusOff')
+                              : selectorStatusTextFor(status === 'throttled' ? selectorMeta.status : status),
+                        );
+                      });
+                    },
+                  },
+                  selectorMeta.status === 'fetching' ? t('settings.selectorStatusFetching') : t('settings.selectorRefresh'),
+                ),
                 h(
                   'button',
                   {
@@ -6427,6 +7235,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         probePageInGuest,
         observeCompletionInGuest,
         installLinkInterceptorInGuest,
+        installEscBridgeInGuest,
         fillComposerInGuest,
         sessionTargets,
         currentSessionId,
@@ -6435,6 +7244,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         mergeCapturedMessages,
         mergePreviewMessages,
         undoInsertedDraft,
+        captureComposerInsertion,
+        resolveInsertionPlan,
+        sanitizeSelectorList,
+        normalizeRemoteSelectors,
+        selectorCandidateSet,
+        loadCachedSelectors,
+        saveCachedSelectors,
+        probeSelectorsInGuest,
         dockPaneById,
         ChatPanel,
         ChatPanelTab,
