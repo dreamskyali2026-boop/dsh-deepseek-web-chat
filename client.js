@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.5.0';
+    const PLUGIN_VERSION = '1.5.1';
     const SELECTOR_VERSION = 1;
     const HANDOFF_LIMIT = 20000;
     const HANDOFF_MODES = ['all', 'last', 'round', 'selection'];
@@ -1001,33 +1001,39 @@ window.__ModuleLoader__.load({
   animation: dsh-dsc-spin 0.8s linear infinite;
 }
 .dsh-dsc-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 30;
-  min-width: 188px;
+  position: fixed;
+  z-index: 90;
+  box-sizing: border-box;
   padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border: 0.5px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  pointer-events: auto;
 }
 .dsh-dsc-menu-item {
   width: 100%;
-  height: 30px;
+  min-height: 30px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 8px;
+  padding: 6px 8px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font: inherit;
   font-size: 12.5px;
+  line-height: 1.35;
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: pointer;
+}
+.dsh-dsc-menu-item > span:last-child {
+  min-width: 0;
 }
 .dsh-dsc-menu-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dsc-menu-sep {
@@ -1798,6 +1804,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         width,
         height: window.innerHeight,
       };
+    }
+
+    function menuLayout(anchor, panel, viewport) {
+      const width = Math.max(180, Math.min(300, Math.round((panel === null ? viewport.width : panel.width) - 16), Math.round(viewport.width - 16)));
+      const anchorRight = Number.isFinite(anchor.right) ? anchor.right : anchor.left + 60;
+      const left = Math.max(8, Math.min(Math.round(anchorRight - width), Math.round(viewport.width - width - 8)));
+      const below = Math.max(0, viewport.height - anchor.bottom - 12);
+      const above = Math.max(0, anchor.top - 12);
+      const openUp = below < 240 && above > below;
+      const maxHeight = Math.max(140, Math.round((openUp ? above : below) - 6));
+      return openUp
+        ? { left, width, maxHeight, bottom: Math.round(viewport.height - anchor.top + 6) }
+        : { left, width, maxHeight, top: Math.round(anchor.bottom + 6) };
     }
 
     function quickGeometry() {
@@ -2899,11 +2918,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [quick, setQuick] = React.useState(false);
       const [quickRect, setQuickRect] = React.useState(null);
       const [historyQuery, setHistoryQuery] = React.useState('');
+      const [menuPosition, setMenuPosition] = React.useState(null);
       const dockDragRef = React.useRef(null);
       const hostRef = React.useRef(null);
       const panelRootRef = React.useRef(null);
       const viewRef = React.useRef(null);
       const handoffRef = React.useRef(null);
+      const menuRef = React.useRef(null);
       const tRef = React.useRef(t);
       const phaseRef = React.useRef(phase);
       const settingsRef = React.useRef(settings);
@@ -3014,6 +3035,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             : [actions];
         setToast({ text, actions: list });
       }, []);
+
+      const toggleMenu = React.useCallback(() => {
+        if (menuOpen) {
+          setMenuOpen(false);
+          return;
+        }
+        const anchor = handoffRef.current === null ? null : handoffRef.current.getBoundingClientRect();
+        const panel = panelRootRef.current === null ? null : panelRootRef.current.getBoundingClientRect();
+        if (anchor !== null) {
+          setMenuPosition(menuLayout(anchor, panel, { width: window.innerWidth, height: window.innerHeight }));
+        }
+        setMenuOpen(true);
+      }, [menuOpen]);
 
       const updateSetting = React.useCallback((key, value) => {
         const next = { ...settingsRef.current, [key]: value };
@@ -3596,10 +3630,31 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         if (!menuOpen) return undefined;
         const onPointerDown = (event) => {
           const root = handoffRef.current;
-          if (root !== null && !root.contains(event.target)) setMenuOpen(false);
+          const menu = menuRef.current;
+          if (root !== null && root.contains(event.target)) return;
+          if (menu !== null && menu.contains(event.target)) return;
+          setMenuOpen(false);
         };
         document.addEventListener('pointerdown', onPointerDown, true);
         return () => document.removeEventListener('pointerdown', onPointerDown, true);
+      }, [menuOpen]);
+
+      React.useEffect(() => {
+        if (!menuOpen) return undefined;
+        const update = () => {
+          const anchor = handoffRef.current === null ? null : handoffRef.current.getBoundingClientRect();
+          const panel = panelRootRef.current === null ? null : panelRootRef.current.getBoundingClientRect();
+          if (anchor !== null) {
+            setMenuPosition(menuLayout(anchor, panel, { width: window.innerWidth, height: window.innerHeight }));
+          }
+        };
+        update();
+        window.addEventListener('resize', update);
+        document.addEventListener('scroll', update, true);
+        return () => {
+          window.removeEventListener('resize', update);
+          document.removeEventListener('scroll', update, true);
+        };
       }, [menuOpen]);
 
       React.useEffect(() => {
@@ -4967,15 +5022,26 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                   title: t('handoff.menu.' + settings.defaultMode),
                   'aria-label': t('handoff.menu.' + settings.defaultMode),
                   'aria-expanded': menuOpen,
-                  onClick: () => setMenuOpen((value) => !value),
+                  onClick: toggleMenu,
                   disabled: busy || phase !== 'ready',
                 },
                 h(ChevronDownGlyph, { size: 12 }),
               ),
-              menuOpen && phase === 'ready'
+              menuOpen && menuPosition !== null && phase === 'ready'
                 ? h(
                     'div',
-                    { className: 'dsh-dsc-menu', role: 'menu' },
+                    {
+                      ref: menuRef,
+                      className: 'dsh-dsc-menu',
+                      role: 'menu',
+                      style: {
+                        left: menuPosition.left,
+                        top: menuPosition.top,
+                        bottom: menuPosition.bottom,
+                        width: menuPosition.width,
+                        maxHeight: menuPosition.maxHeight,
+                      },
+                    },
                     HANDOFF_MODES.map((mode) =>
                       h(
                         'button',
@@ -5354,6 +5420,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         clampDockWidth,
         dockGeometry,
         quickGeometry,
+        menuLayout,
         normalizeSettings,
         loadSettings,
         saveSettings,

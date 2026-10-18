@@ -45,6 +45,7 @@ const {
   clampDockWidth,
   dockGeometry,
   quickGeometry,
+  menuLayout,
   normalizeSettings,
   loadSettings,
   saveSettings,
@@ -282,10 +283,12 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
           returnToHarness: true,
         };
       }
+      if (index === 6) states[index] = true;
       if (index === 13) states[index] = 'in';
       if (index === 16) states[index] = true;
       if (index === 17) states[index] = true;
       if (index === 19) states[index] = true;
+      if (index === 27) states[index] = { left: 100, top: 100, width: 220, maxHeight: 300 };
       const setter = (value) => {
         states[index] = typeof value === 'function' ? value(states[index]) : value;
       };
@@ -324,6 +327,7 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
     const flat = JSON.stringify(panel);
     assert.match(flat, /dsh-dsc-panel-docked/);
     assert.match(flat, /dsh-dsc-resize/);
+    assert.match(flat, /dsh-dsc-menu/);
     assert.match(flat, /dsh-dsc-preview/);
     assert.match(flat, /dsh-dsc-toast/);
     assert.match(flat, /preview\.insert/);
@@ -504,7 +508,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.5.0');
+  assert.equal(parsed.version, '1.5.1');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(text.includes('一段很长的对话标题'), false);
@@ -743,4 +747,24 @@ test('quick mode renders the compact floating panel', () => {
   } finally {
     globalThis.window = previousWindow;
   }
+});
+
+test('menuLayout clamps to a narrow panel and flips upward near the bottom', () => {
+  const narrow = menuLayout(
+    { left: 1200, right: 1270, top: 100, bottom: 130 },
+    { left: 1100, right: 1300, top: 0, bottom: 800, width: 200 },
+    { width: 1600, height: 900 },
+  );
+  assert.equal(narrow.width, 184);
+  assert.equal(narrow.left, 1086);
+  assert.equal(narrow.top, 136);
+  assert.ok(narrow.maxHeight > 140);
+  const flipped = menuLayout(
+    { left: 1200, right: 1270, top: 760, bottom: 790 },
+    { left: 1100, right: 1300, top: 0, bottom: 800, width: 200 },
+    { width: 1600, height: 900 },
+  );
+  assert.equal(flipped.bottom, 146);
+  assert.equal(flipped.top, undefined);
+  assert.equal(flipped.width, 184);
 });
