@@ -93,6 +93,10 @@ const {
   saveCachedSelectors,
   probeSelectorsInGuest,
   dockPaneById,
+  formatClock,
+  historyStore,
+  ComposerDock,
+  SettingsSection,
   ChatPanel,
   ChatPanelTab,
   createHandoffDelivery,
@@ -236,7 +240,7 @@ const mkEl = (tag, attrs = {}, children = []) => {
   return element;
 };
 
-test('extractInGuest preserves links, images and Markdown tables', async () => {
+test('extractInGuest preserves links, images, tables, math and task lists', async () => {
   const link = mkEl('A', { href: '/docs' }, [mkText('文档')]);
   const image = mkEl('IMG', { alt: '截图', src: 'https://example.com/a.png' });
   const paragraph = mkEl('P', {}, [link, mkText(' '), image]);
@@ -244,7 +248,28 @@ test('extractInGuest preserves links, images and Markdown tables', async () => {
     mkEl('TR', {}, [mkEl('TH', {}, [mkText('列 A')]), mkEl('TH', {}, [mkText('列 B')])]),
     mkEl('TR', {}, [mkEl('TD', {}, [mkText('1')]), mkEl('TD', {}, [mkText('2')])]),
   ]);
-  const content = mkEl('DIV', { class: 'ds-assistant-message-main-content' }, [paragraph, table]);
+  const math = mkEl('SPAN', { class: 'katex' }, [
+    mkEl('ANNOTATION', { encoding: 'application/x-tex' }, [mkText('E = mc^2')]),
+    mkEl('SPAN', { class: 'katex-html' }, [mkText('E = mc2')]),
+  ]);
+  const displayMath = mkEl('SPAN', { class: 'katex-display' }, [math]);
+  const citation = mkEl('P', {}, [mkText('结论如下'), mkEl('SUP', {}, [mkText('1')])]);
+  const taskList = mkEl('UL', {}, [
+    mkEl('LI', {}, [mkEl('INPUT', { type: 'checkbox', checked: '' }), mkText('已完成')]),
+    mkEl('LI', {}, [mkEl('INPUT', { type: 'checkbox' }), mkText('待办')]),
+  ]);
+  const alignedTable = mkEl('TABLE', {}, [
+    mkEl('TR', {}, [mkEl('TH', { align: 'left' }, [mkText('左')]), mkEl('TH', { align: 'right' }, [mkText('右')])]),
+    mkEl('TR', {}, [mkEl('TD', {}, [mkText('1')]), mkEl('TD', {}, [mkText('2')])]),
+  ]);
+  const content = mkEl('DIV', { class: 'ds-assistant-message-main-content' }, [
+    paragraph,
+    table,
+    displayMath,
+    taskList,
+    alignedTable,
+    citation,
+  ]);
   const item = mkEl('DIV', { 'data-virtual-list-item-key': 'k1' }, [content]);
   const scroller = { parentElement: null, scrollHeight: 500, clientHeight: 400, scrollTop: 0 };
   const body = { parentElement: null };
@@ -284,6 +309,11 @@ test('extractInGuest preserves links, images and Markdown tables', async () => {
     assert.match(text, /!\[截图\]\(https:\/\/example\.com\/a\.png\)/);
     assert.match(text, /\| 列 A \| 列 B \|/);
     assert.match(text, /\| --- \| --- \|/);
+    assert.match(text, /\$\$\nE = mc\^2\n\$\$/);
+    assert.match(text, /- \[x\] 已完成/);
+    assert.match(text, /- \[ \] 待办/);
+    assert.match(text, /\| :--- \| ---: \|/);
+    assert.match(text, /结论如下\[1\]/);
     assert.equal(result.messages[0].key, 'k1');
     assert.equal(result.done, true);
     assert.equal(result.atStart, true);
@@ -581,6 +611,8 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
     assert.match(flat, /dsh-dsc-lint/);
     assert.match(flat, /preview\.lint\.title/);
     assert.match(flat, /preview\.lint\.maskAll/);
+    assert.match(flat, /dsh-dsc-preview-editor/);
+    assert.match(flat, /preview\.editHint/);
     assert.match(flat, /dsh-dsc-modal-settings/);
     assert.match(flat, /settings\.title/);
     assert.match(flat, /settings\.remoteSelectors/);
@@ -912,7 +944,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.7.0');
+  assert.equal(parsed.version, '1.8.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -1828,4 +1860,175 @@ test('captureSegment forwards the remote selector set to the guest source', asyn
   assert.match(source, /extractInGuest/);
   assert.match(source, /\.new-item/);
   assert.match(source, /data-msg-id/);
+});
+
+test('formatClock renders a short local clock label', () => {
+  assert.equal(formatClock(new Date(2026, 9, 28, 19, 5)), '19:05');
+  assert.equal(formatClock(new Date(2026, 0, 1, 0, 0)), '00:00');
+});
+
+test('historyStore publishes only when the latest handoff changes', () => {
+  saveHistory([]);
+  let notifications = 0;
+  const unsubscribe = historyStore.subscribe(() => {
+    notifications += 1;
+  });
+  assert.equal(historyStore.getSnapshot(), null);
+  saveHistory([{ id: 'a', hash: 'h1', time: 1, messages: [] }]);
+  assert.equal(historyStore.getSnapshot().id, 'a');
+  saveHistory([{ id: 'a', hash: 'h2', time: 2, messages: [] }]);
+  saveHistory([]);
+  assert.equal(historyStore.getSnapshot(), null);
+  unsubscribe();
+  assert.equal(notifications, 2);
+});
+
+test('composer dock shows the latest handoff and opens the plugin', () => {
+  saveHistory([
+    {
+      id: 'dock-1',
+      hash: 'dock',
+      time: new Date(2026, 9, 28, 19, 5).getTime(),
+      messages: [{ role: 'user', text: 'a' }, { role: 'assistant', text: 'b' }],
+      sourceTitle: '需求讨论',
+    },
+  ]);
+  const calls = [];
+  const stub = {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  };
+  const tree = ComposerDock(
+    {
+      t,
+      openPanel: () => calls.push('open'),
+      openQuick: () => calls.push('quick'),
+      history: historyStore,
+    },
+    stub,
+  );
+  const flat = JSON.stringify(tree);
+  assert.match(flat, /dsh-dsc-composer-dock/);
+  assert.match(flat, /composer\.latest/);
+  assert.match(flat, /composer\.quick/);
+  const buttons = [];
+  const visit = (node) => {
+    if (node === null || typeof node !== 'object') return;
+    if (node.type === 'button') buttons.push(node);
+    const children = node.props === undefined ? undefined : node.props.children;
+    if (Array.isArray(children)) children.forEach(visit);
+    else visit(children);
+  };
+  visit(tree);
+  assert.equal(buttons.length, 2);
+  buttons[0].props.onClick();
+  buttons[1].props.onClick();
+  assert.deepEqual(calls, ['open', 'quick']);
+  saveHistory([]);
+});
+
+test('settings section exposes panel actions and local data reset', () => {
+  const stub = {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      return [typeof initial === 'function' ? initial() : initial, () => {}];
+    },
+  };
+  const tree = SettingsSection(
+    {
+      t,
+      openPanel() {},
+      openQuick() {},
+      openHistory() {},
+      close() {},
+    },
+    stub,
+  );
+  const flat = JSON.stringify(tree);
+  assert.match(flat, /dsh-dsc-settings-page/);
+  assert.match(flat, /settings\.pageOpen/);
+  assert.match(flat, /settings\.pageHistory/);
+  assert.match(flat, /settings\.pageClear/);
+  assert.match(flat, /settings\.pageVersion/);
+});
+
+test('apply registers the panel, composer dock and settings section', () => {
+  const registrations = [];
+  const disposers = [];
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    head: { appendChild() {} },
+    createElement() {
+      return { dataset: {}, textContent: '', remove() {} };
+    },
+  };
+  const stubEffect = (fn) => {
+    const result = fn();
+    if (typeof result === 'function') disposers.push(result);
+    return () => {};
+  };
+  const slotScope = {
+    effect: stubEffect,
+    sidebarRightTabs: { register: () => () => {} },
+  };
+  const ctx = {
+    locale: {
+      bind: () => t,
+      register: () => () => {},
+      getSnapshot: () => ({ revision: 0 }),
+    },
+    effect: stubEffect,
+    slots: {
+      inject(name, callback) {
+        callback();
+        return () => {};
+      },
+      register(options) {
+        registrations.push(options);
+        return () => {};
+      },
+    },
+    layout: {
+      selectPanel() {},
+      panelInfo: { getSnapshot: () => ({ activePanelId: null }) },
+    },
+    shortcuts: { register: () => () => {} },
+    inject(_deps, callback) {
+      callback(slotScope);
+    },
+    get() {
+      return undefined;
+    },
+  };
+  try {
+    moduleDefinition.factory(() => ({})).apply(ctx);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+  const names = registrations.map((row) => row.name);
+  for (const name of [
+    'sidebar.right.pane.tab',
+    'main',
+    'sidebar.panellist',
+    'shell.overlay',
+    'conversation.composer.dock',
+    'settings.section',
+  ]) {
+    assert.ok(names.includes(name), 'registered ' + name);
+  }
+  const dock = registrations.find((row) => row.name === 'conversation.composer.dock');
+  assert.equal(dock.id, 'deepseek-web-chat');
+  assert.equal(typeof dock.inject, 'function');
+  const dockProps = dock.inject();
+  assert.equal(typeof dockProps.openPanel, 'function');
+  assert.equal(typeof dockProps.history.getSnapshot, 'function');
+  const settings = registrations.find((row) => row.name === 'settings.section');
+  assert.equal(typeof settings.label(), 'string');
+  assert.equal(settings.label(), 'settings.nav');
 });

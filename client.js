@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.7.0';
+    const PLUGIN_VERSION = '1.8.0';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -76,6 +76,32 @@ window.__ModuleLoader__.load({
             listener();
           } catch (error) {
             /* Undo overlay listeners are best effort. */
+          }
+        }
+      },
+    };
+
+    let latestHistoryRow = null;
+    const historyListeners = new Set();
+    const historyStore = {
+      getSnapshot: () => latestHistoryRow,
+      subscribe(listener) {
+        historyListeners.add(listener);
+        return () => historyListeners.delete(listener);
+      },
+      set(rows) {
+        const next =
+          Array.isArray(rows) && rows.length > 0 && rows[0] !== null && typeof rows[0] === 'object' ? rows[0] : null;
+        const sameId =
+          (next === null ? '' : String(next.id || '')) ===
+          (latestHistoryRow === null ? '' : String(latestHistoryRow.id || ''));
+        latestHistoryRow = next;
+        if (sameId) return;
+        for (const listener of [...historyListeners]) {
+          try {
+            listener();
+          } catch (error) {
+            /* Composer dock listeners are best effort. */
           }
         }
       },
@@ -256,7 +282,9 @@ window.__ModuleLoader__.load({
     }
 
     function saveHistory(rows) {
-      return writeJson(HISTORY_KEY, (Array.isArray(rows) ? rows : []).slice(0, HISTORY_LIMIT));
+      const next = (Array.isArray(rows) ? rows : []).slice(0, HISTORY_LIMIT);
+      historyStore.set(next);
+      return writeJson(HISTORY_KEY, next);
     }
 
     function normalizeDraft(value) {
@@ -622,6 +650,9 @@ window.__ModuleLoader__.load({
       'preview.autoSendHint': '会直接发送到 Harness，不再由你确认。建议先检查最终文本。',
       'preview.send': '插入并发送',
       'preview.export': '导出 .md',
+      'preview.editHint': '最终文本可直接编辑；编辑内容会用于插入、复制和导出。',
+      'preview.editReset': '还原为生成内容',
+      'preview.emptyText': '最终文本为空',
       'preview.lint.title': '发现 {secret} 处敏感信息 · {injection} 处可疑指令',
       'preview.lint.hint': '这些内容会随接力进入 agent 上下文，建议先打码。',
       'preview.lint.mask': '打码',
@@ -697,6 +728,20 @@ window.__ModuleLoader__.load({
       'reverse.noSession': '（没有打开的 Harness 会话）',
       'reverse.failed': '填入失败，请先在 DeepSeek 页面登录并打开对话',
       'settings.title': 'DeepSeek 聊天设置',
+      'settings.nav': 'DeepSeek 网页聊天',
+      'settings.pageHint': '从系统设置直接打开 DeepSeek 面板、快速提问或接力历史；其余偏好仍在面板内的设置里调整。',
+      'settings.pageOpen': '打开 DeepSeek 面板',
+      'settings.pageQuick': '快速提问',
+      'settings.pageHistory': '接力历史',
+      'settings.pageClear': '清空本地数据',
+      'settings.pageClearConfirm': '确认清空本地数据？',
+      'settings.pageClearHint': '会清除接力历史、本地统计、草稿快照、快捷小窗位置和插件偏好；不会影响 DeepSeek 登录态。',
+      'settings.pageCleared': '本地数据已清空',
+      'settings.pageVersion': '版本 {version}',
+      'composer.latest': '最近接力 {time} · {count} 条',
+      'composer.quick': '快速提问',
+      'composer.hint': '打开 DeepSeek 面板',
+      'composer.hintSource': '来源：{title}',
       'settings.close': '关闭',
       'settings.defaultMode': '默认接力范围',
       'settings.defaultFormat': '默认交接格式',
@@ -933,6 +978,9 @@ window.__ModuleLoader__.load({
       'preview.autoSendHint': 'Sends to Harness without another confirmation. Check the final text first.',
       'preview.send': 'Insert & send',
       'preview.export': 'Export .md',
+      'preview.editHint': 'Edit the final text directly; your edits are inserted, copied and exported.',
+      'preview.editReset': 'Reset to generated text',
+      'preview.emptyText': 'The final text is empty',
       'preview.lint.title': '{secret} sensitive finding(s) · {injection} injection cue(s)',
       'preview.lint.hint': 'These lines reach the agent on handoff; consider masking them first.',
       'preview.lint.mask': 'Mask',
@@ -1008,6 +1056,20 @@ window.__ModuleLoader__.load({
       'reverse.noSession': '(no open Harness conversation)',
       'reverse.failed': 'Could not fill the composer. Sign in and open a DeepSeek conversation first.',
       'settings.title': 'DeepSeek Chat settings',
+      'settings.nav': 'DeepSeek Web Chat',
+      'settings.pageHint': 'Open the DeepSeek panel, ask a quick question, or browse handoff history from Settings. Other preferences stay in the panel.',
+      'settings.pageOpen': 'Open DeepSeek panel',
+      'settings.pageQuick': 'Quick ask',
+      'settings.pageHistory': 'Handoff history',
+      'settings.pageClear': 'Clear local data',
+      'settings.pageClearConfirm': 'Confirm clearing local data?',
+      'settings.pageClearHint': 'Clears handoff history, local counters, draft snapshots, quick-window position and plugin preferences. DeepSeek sign-in is not affected.',
+      'settings.pageCleared': 'Local data cleared',
+      'settings.pageVersion': 'Version {version}',
+      'composer.latest': 'Last handoff {time} · {count} msg',
+      'composer.quick': 'Quick ask',
+      'composer.hint': 'Open the DeepSeek panel',
+      'composer.hintSource': 'Source: {title}',
       'settings.close': 'Close',
       'settings.defaultMode': 'Default handoff scope',
       'settings.defaultFormat': 'Default handoff format',
@@ -1759,21 +1821,32 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   font-size: 11px;
   line-height: 1.45;
 }
-.dsh-dsc-preview-final {
-  max-height: 150px;
-  margin: 0;
-  overflow: auto;
+.dsh-dsc-preview-editor-wrap { display: flex; flex-direction: column; gap: 6px; }
+.dsh-dsc-preview-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.dsh-dsc-preview-editor-head span { flex: 1 1 auto; min-width: 0; }
+.dsh-dsc-preview-editor {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 120px;
+  max-height: 260px;
+  resize: vertical;
   padding: 8px 10px;
-  border: 0.5px solid var(--dsw-alias-border-l3);
+  border: 0.5px solid var(--dsw-alias-border-l2);
   border-radius: 8px;
   background: var(--dsw-alias-bg-base);
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-label-primary);
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  font-size: 11.5px;
+  line-height: 1.55;
 }
+.dsh-dsc-preview-editor:focus-visible { outline: 2px solid var(--dsw-alias-brand, #4e6ef2); outline-offset: 1px; }
 .dsh-dsc-preview-foot {
   display: flex;
   align-items: center;
@@ -1955,6 +2028,67 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dsc-lint-meta { flex: 1 1 auto; min-width: 0; color: var(--dsw-alias-label-tertiary); }
 .dsh-dsc-lint-row .dsh-dsc-chip { flex: 0 0 auto; }
 .dsh-dsc-lint-summary { color: var(--dsw-alias-label-tertiary); }
+.dsh-dsc-composer-dock {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dsc-composer-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 22px;
+  padding: 0 8px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dsh-dsc-composer-main:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dsc-composer-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-business-primary, #4d6bfe);
+}
+.dsh-dsc-composer-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dsc-composer-action {
+  flex: none;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dsh-dsc-composer-action:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dsc-settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 24px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.dsh-dsc-settings-title { margin: 0; color: var(--dsw-alias-label-primary); font-size: 16px; font-weight: 600; }
+.dsh-dsc-settings-subtitle { margin: 8px 0 0; color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 500; }
+.dsh-dsc-settings-copy { margin: 0; color: var(--dsw-alias-label-secondary); }
+.dsh-dsc-settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dsh-dsc-settings-note { color: var(--dsw-alias-label-tertiary); font-size: 11.5px; }
+.dsh-dsc-settings-version { margin: 12px 0 0; color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.dsh-dsc-button.dsh-dsc-danger { color: #e5484d; border-color: color-mix(in srgb, #e5484d 45%, transparent); }
 .dsh-dsc-modal-settings {
   width: min(580px, 100%);
   max-height: calc(100% - 24px);
@@ -2728,6 +2862,24 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           .replace(/[ \t]+\n/g, '\n')
           .replace(/\n{3,}/g, '\n\n')
           .trim();
+      const mathTexOf = (el) => {
+        const attr = el.getAttribute('data-latex') || el.getAttribute('latex');
+        if (typeof attr === 'string' && attr.trim() !== '') return attr.trim();
+        let nodes = [];
+        try {
+          nodes = el.querySelectorAll('annotation');
+        } catch (error) {
+          nodes = [];
+        }
+        for (const node of nodes) {
+          const encoding = String(node.getAttribute('encoding') || '').toLowerCase();
+          if (encoding === 'application/x-tex' || encoding === 'tex') {
+            const tex = String(node.textContent || '').trim();
+            if (tex !== '') return tex;
+          }
+        }
+        return '';
+      };
       const textOf = (node) => {
         if (node === null || node === undefined) return '';
         if (node.nodeType === 3) return node.nodeValue || '';
@@ -2745,6 +2897,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           return '';
         }
         if (el.getAttribute('aria-hidden') === 'true') return '';
+        const classTokens = className.split(/\s+/).filter((token) => token !== '');
+        const displayMath =
+          classTokens.indexOf('katex-display') !== -1 ||
+          (tag === 'MATH' && (el.getAttribute('display') || '') === 'block');
+        const isMath =
+          tag === 'MATH' ||
+          tag === 'MJX-CONTAINER' ||
+          displayMath ||
+          classTokens.indexOf('katex') !== -1 ||
+          classTokens.indexOf('katex-mathml') !== -1 ||
+          classTokens.indexOf('math') !== -1;
+        if (isMath) {
+          const tex = mathTexOf(el);
+          if (tex !== '') return displayMath ? '\n$$\n' + tex + '\n$$\n' : '$' + tex + '$';
+        }
         if (tag === 'BR') return '\n';
         if (tag === 'IMG') {
           const alt = el.getAttribute('alt') || '图片';
@@ -2768,17 +2935,32 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         if (tag === 'TABLE') {
           const rows = el.querySelectorAll('tr');
           const lines = [];
+          const alignOf = (cell) => {
+            const attr = String(cell.getAttribute('align') || '').toLowerCase();
+            if (attr === 'left' || attr === 'center' || attr === 'right') return attr;
+            const style = String(cell.getAttribute('style') || '');
+            const match = /text-align\s*:\s*(left|center|right)/i.exec(style);
+            return match === null ? '' : match[1].toLowerCase();
+          };
           for (const row of rows) {
             const cells = row.querySelectorAll('th,td');
             if (cells.length === 0) continue;
             const values = [];
+            const aligns = [];
             for (const cell of cells) {
               let value = '';
               for (const child of cell.childNodes) value += textOf(child);
               values.push(clean(value).replace(/\|/g, '\\|').replace(/\n+/g, ' ').trim());
+              aligns.push(alignOf(cell));
             }
+            const firstRow = lines.length === 0;
             lines.push('| ' + values.join(' | ') + ' |');
-            if (lines.length === 1) lines.push('| ' + values.map(() => '---').join(' | ') + ' |');
+            if (firstRow) {
+              const separators = aligns.map((align) =>
+                align === 'center' ? ':---:' : align === 'right' ? '---:' : align === 'left' ? ':---' : '---',
+              );
+              lines.push('| ' + separators.join(' | ') + ' |');
+            }
           }
           return lines.length === 0 ? '' : '\n' + lines.join('\n') + '\n';
         }
@@ -2796,7 +2978,31 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           }
           return '[' + label + '](' + absolute + ')';
         }
-        if (tag === 'LI') return '\n- ' + out.trim() + '\n';
+        if (tag === 'SUP') {
+          const mark = out.trim();
+          if (mark === '') return '';
+          return mark.indexOf('](') === -1 ? '[' + mark + ']' : mark;
+        }
+        if (tag === 'LI') {
+          let marker = '- ';
+          let box = null;
+          try {
+            box = el.querySelector('input');
+          } catch (error) {
+            box = null;
+          }
+          if (box !== null && box !== undefined) {
+            const type = String(box.getAttribute('type') || '').toLowerCase();
+            if (type === 'checkbox' || box.getAttribute('role') === 'checkbox') {
+              const checked =
+                box.checked === true ||
+                box.getAttribute('checked') !== null ||
+                box.getAttribute('aria-checked') === 'true';
+              marker = checked ? '- [x] ' : '- [ ] ';
+            }
+          }
+          return '\n' + marker + out.trim() + '\n';
+        }
         if (tag === 'TD' || tag === 'TH') return ' ' + out.trim() + ' |';
         if (BLOCKS.has(tag)) return '\n' + out + '\n';
         return out;
@@ -3172,6 +3378,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         ':' +
         pad(date.getMinutes())
       );
+    }
+
+    /** Short clock label for the composer dock (HH:mm). */
+    function formatClock(date) {
+      const pad = (value) => String(value).padStart(2, '0');
+      return pad(date.getHours()) + ':' + pad(date.getMinutes());
     }
 
     function splitSummaryLines(text) {
@@ -5476,6 +5688,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               sourceUrl,
               sourceTitle,
               maskedIds: [],
+              editedText: null,
             });
             track('dsc_handoff_preview', { duration_ms: Math.max(0, Date.now() - startedAt) });
           } catch (cause) {
@@ -5528,6 +5741,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               ...current,
               messages: merged,
               maskedIds: [],
+              editedText: null,
               truncated: !done || !atStart,
               capture: {
                 done,
@@ -5565,6 +5779,20 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       toggleRef.current = toggle;
       requestHandoffRef.current = requestHandoff;
       openRef.current = open;
+
+      React.useEffect(() => {
+        const onReset = () => {
+          const next = loadSettings();
+          settingsRef.current = next;
+          setSettings(next);
+          setHistory(loadHistory());
+          setDraftOffer(loadDraft());
+          setHistoryOpen(false);
+          setSettingsOpen(false);
+        };
+        window.addEventListener('dsh-deepseek-web-chat:reset', onReset);
+        return () => window.removeEventListener('dsh-deepseek-web-chat:reset', onReset);
+      }, []);
 
       React.useEffect(() => {
         if (!visible) return undefined;
@@ -6018,6 +6246,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           toggle: () => toggleRef.current?.(),
           handoff: () => requestHandoffRef.current?.(),
           release: () => setOpened(false),
+          open: () => {
+            setQuick(false);
+            setDocked(false);
+            open();
+          },
+          history: () => {
+            setQuick(false);
+            setDocked(false);
+            open();
+            setHistory(loadHistory());
+            setHistoryOpen(true);
+            track('dsc_open', { source: 'history' });
+          },
           quick: () => {
             if (quickRef.current) {
               setQuick(false);
@@ -6049,6 +6290,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           return {
             ...current,
             maskedIds: [],
+            editedText: null,
             messages: current.messages.map((message, position) =>
               position === index ? { ...message, selected: !message.selected } : message,
             ),
@@ -6062,6 +6304,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           return {
             ...current,
             maskedIds: [],
+            editedText: null,
             messages: current.messages.map((message) => ({
               ...message,
               selected:
@@ -6082,7 +6325,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const previewTemplate =
         preview === null || !HANDOFF_TEMPLATES.includes(preview.template) ? 'none' : preview.template;
       const previewInsertPosition = preview === null ? 'end' : preview.insertPosition === 'cursor' ? 'cursor' : 'end';
-      const previewBaseText =
+      const previewGeneratedText =
         preview === null || previewSelected.length === 0
           ? ''
           : formatHandoff(previewSelected, preview.mode, preview.truncated, t, {
@@ -6090,6 +6333,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               format: previewFormat,
               template: previewTemplate,
             });
+      const previewEditedText =
+        preview !== null && typeof preview.editedText === 'string' ? preview.editedText : null;
+      const previewBaseText = previewEditedText === null ? previewGeneratedText : previewEditedText;
       const previewFindings =
         previewBaseText === ''
           ? []
@@ -6109,6 +6355,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const previewInjectionCount = previewFindings.length - previewSecretCount;
       const previewAllMasked =
         previewFindings.length > 0 && previewFindings.every((finding) => previewMaskedSet.has(finding.id));
+      const previewEmptyText = previewText.trim() === '';
+      const resetPreviewEdit = () => {
+        setPreview((current) =>
+          current === null ? current : { ...current, editedText: null, maskedIds: [] },
+        );
+      };
+      const editPreviewText = (value) => {
+        setPreview((current) =>
+          current === null ? current : { ...current, editedText: String(value), maskedIds: [] },
+        );
+      };
       const toggleMask = (id) => {
         setPreview((current) => {
           if (current === null) return current;
@@ -6131,11 +6388,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const previewChars = previewText.length;
       const previewTokens = previewText === '' ? 0 : estimateTokens(previewText);
       const previewRawChars = previewSelected.reduce((sum, message) => sum + String(message.text || '').length, 0);
+      const maskedSignature =
+        previewMaskedSet.size === 0 ? '' : Array.from(previewMaskedSet).sort().join('|');
+      const previewSignature =
+        previewEditedText === null
+          ? maskedSignature
+          : 'e:' + previewEditedText + (maskedSignature === '' ? '' : '\u0001' + maskedSignature);
       const previewHash = handoffHash(
         previewSelected,
         previewFormat,
         previewTemplate,
-        previewMaskedSet.size === 0 ? undefined : Array.from(previewMaskedSet).sort().join('|'),
+        previewSignature === '' ? undefined : previewSignature,
       );
       const dedupeMatch =
         preview !== null && settings.dedupe ? history.find((row) => row.hash === previewHash) : undefined;
@@ -6146,6 +6409,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         if (preview === null) return;
         if (previewSelected.length === 0) {
           showToast(t('preview.empty'));
+          return;
+        }
+        if (previewText.trim() === '') {
+          showToast(t('preview.emptyText'));
           return;
         }
         if (preview.targetSessionId === '') {
@@ -6191,6 +6458,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           showToast(t('preview.empty'));
           return;
         }
+        if (previewText.trim() === '') {
+          showToast(t('preview.emptyText'));
+          return;
+        }
         const copied = await copyText(previewText);
         showToast(copied ? t('handoff.copied') : t('handoff.error.failed'));
       }, [preview, previewSelected, previewText, showToast, t]);
@@ -6198,6 +6469,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const exportPreview = React.useCallback(() => {
         if (preview === null || previewSelected.length === 0) {
           showToast(t('preview.empty'));
+          return;
+        }
+        if (previewText.trim() === '') {
+          showToast(t('preview.emptyText'));
           return;
         }
         const stamp = formatStamp(new Date()).replace(/[: ]/g, '-');
@@ -6404,6 +6679,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             sourceUrl: normalizeSourceUrl(row.sourceUrl),
             sourceTitle: typeof row.sourceTitle === 'string' ? row.sourceTitle : '',
             maskedIds: [],
+            editedText: null,
           });
         },
         [delivery, listTargets],
@@ -6669,7 +6945,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                             'data-active': previewFormat === format ? 'true' : undefined,
                             onClick: () =>
                               setPreview((current) =>
-                                current === null ? current : { ...current, format, maskedIds: [] },
+                                current === null ? current : { ...current, format, maskedIds: [], editedText: null },
                               ),
                           },
                           t('preview.format.' + format),
@@ -6688,7 +6964,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                           onChange: (event) => {
                             const value = event.target.value;
                             setPreview((current) =>
-                              current === null ? current : { ...current, template: value, maskedIds: [] },
+                              current === null ? current : { ...current, template: value, maskedIds: [], editedText: null },
                             );
                           },
                         },
@@ -6903,7 +7179,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                       checked: preview.safety,
                       onChange: () =>
                         setPreview((current) =>
-                          current === null ? current : { ...current, safety: !current.safety, maskedIds: [] },
+                          current === null ? current : { ...current, safety: !current.safety, maskedIds: [], editedText: null },
                         ),
                     }),
                     h('span', null, t('preview.safety'), h('small', null, t('preview.safetyHint'))),
@@ -6937,8 +7213,29 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                       )
                     : null,
                 ),
-                preview.showText && previewText !== ''
-                  ? h('pre', { className: 'dsh-dsc-preview-final' }, previewText)
+                preview.showText
+                  ? h(
+                      'div',
+                      { className: 'dsh-dsc-preview-editor-wrap' },
+                      h(
+                        'div',
+                        { className: 'dsh-dsc-preview-editor-head' },
+                        h('span', null, t('preview.editHint')),
+                        previewEditedText === null
+                          ? null
+                          : h(
+                              'button',
+                              { type: 'button', className: 'dsh-dsc-chip', onClick: resetPreviewEdit },
+                              t('preview.editReset'),
+                            ),
+                      ),
+                      h('textarea', {
+                        className: 'dsh-dsc-preview-editor',
+                        value: previewText,
+                        spellCheck: false,
+                        onChange: (event) => editPreviewText(event.target.value),
+                      }),
+                    )
                   : null,
                 h(
                   'div',
@@ -6995,7 +7292,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                       {
                         type: 'button',
                         className: 'dsh-dsc-button dsh-dsc-primary',
-                        disabled: previewSelected.length === 0 || preview.targetSessionId === '' || busy,
+                        disabled: previewSelected.length === 0 || previewEmptyText || preview.targetSessionId === '' || busy,
                         onClick: commitPreview,
                       },
                       preview.autoSend === true && settings.autoSend
@@ -7806,9 +8103,134 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       );
     }
 
+    function ComposerDock({ t, openPanel, openQuick, history }) {
+      const latest = React.useSyncExternalStore(history.subscribe, history.getSnapshot);
+      if (latest === null) return null;
+      const source = typeof latest.sourceTitle === 'string' ? latest.sourceTitle : '';
+      const count = Array.isArray(latest.messages) ? latest.messages.length : 0;
+      const label = t('composer.latest', {
+        time: formatClock(new Date(Number(latest.time) || Date.now())),
+        count,
+      });
+      return h(
+        'div',
+        { className: 'dsh-dsc-composer-dock' },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-dsc-composer-main',
+            title: source === '' ? t('composer.hint') : t('composer.hintSource', { title: source }),
+            onClick: () => openPanel(),
+          },
+          h('span', { className: 'dsh-dsc-composer-dot', 'aria-hidden': true }),
+          h('span', { className: 'dsh-dsc-composer-label' }, label),
+        ),
+        h(
+          'button',
+          { type: 'button', className: 'dsh-dsc-composer-action', onClick: () => openQuick() },
+          t('composer.quick'),
+        ),
+      );
+    }
+
+    function SettingsSection({ t, openPanel, openQuick, openHistory, close }) {
+      const [confirmClear, setConfirmClear] = React.useState(false);
+      const [cleared, setCleared] = React.useState(false);
+      const metrics = loadMetrics();
+      const count = (key) => Number(metrics.counts[key]) || 0;
+      const leave = () => {
+        if (typeof close === 'function') close();
+      };
+      const run = (action) => {
+        action();
+        leave();
+      };
+      const clearLocal = () => {
+        for (const key of [SETTINGS_KEY, HISTORY_KEY, METRICS_KEY, DRAFT_KEY, QUICK_RECT_KEY]) {
+          try {
+            window.localStorage.removeItem(key);
+          } catch (error) {
+            /* Clearing local data is best effort. */
+          }
+        }
+        historyStore.set([]);
+        try {
+          window.dispatchEvent(new CustomEvent('dsh-deepseek-web-chat:reset'));
+        } catch (error) {
+          /* The panel reloads its state from storage on the next mount. */
+        }
+        setConfirmClear(false);
+        setCleared(true);
+      };
+      return h(
+        'section',
+        { className: 'dsh-dsc-settings-page' },
+        h('h2', { className: 'dsh-dsc-settings-title' }, t('settings.title')),
+        h('p', { className: 'dsh-dsc-settings-copy' }, t('settings.pageHint')),
+        h(
+          'div',
+          { className: 'dsh-dsc-settings-actions' },
+          h(
+            'button',
+            { type: 'button', className: 'dsh-dsc-button dsh-dsc-primary', onClick: () => run(openPanel) },
+            t('settings.pageOpen'),
+          ),
+          h(
+            'button',
+            { type: 'button', className: 'dsh-dsc-button', onClick: () => run(openQuick) },
+            t('settings.pageQuick'),
+          ),
+          h(
+            'button',
+            { type: 'button', className: 'dsh-dsc-button', onClick: () => run(openHistory) },
+            t('settings.pageHistory'),
+          ),
+        ),
+        h('h3', { className: 'dsh-dsc-settings-subtitle' }, t('settings.stats')),
+        h(
+          'p',
+          { className: 'dsh-dsc-settings-copy' },
+          t('settings.statsBody', {
+            open: count('dsc_open'),
+            preview: count('dsc_handoff_preview'),
+            ok: count('dsc_handoff_ok'),
+            failed: count('dsc_handoff_failed'),
+            undo: count('dsc_undo'),
+          }),
+        ),
+        h('p', { className: 'dsh-dsc-settings-copy' }, t('settings.pageClearHint')),
+        h(
+          'div',
+          { className: 'dsh-dsc-settings-actions' },
+          confirmClear
+            ? h(
+                'button',
+                { type: 'button', className: 'dsh-dsc-button dsh-dsc-danger', onClick: clearLocal },
+                t('settings.pageClearConfirm'),
+              )
+            : h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-dsc-button',
+                  onClick: () => {
+                    setConfirmClear(true);
+                    setCleared(false);
+                  },
+                },
+                t('settings.pageClear'),
+              ),
+          cleared ? h('span', { className: 'dsh-dsc-settings-note' }, t('settings.pageCleared')) : null,
+        ),
+        h('p', { className: 'dsh-dsc-settings-version' }, t('settings.pageVersion', { version: PLUGIN_VERSION })),
+      );
+    }
+
     function apply(ctx) {
       const t = ctx.locale.bind(NS);
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'deepseek-web-chat: dictionaries');
+      historyStore.set(loadHistory());
 
       ctx.effect(() => {
         const tag = document.createElement('style');
@@ -8069,6 +8491,49 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           UndoToast,
         ),
       );
+
+      const openMainPanel = () => {
+        if (panelControl !== null && typeof panelControl.open === 'function') {
+          panelControl.open();
+          return;
+        }
+        openPanel();
+      };
+
+      const openHistoryPanel = () => {
+        if (panelControl !== null && typeof panelControl.history === 'function') {
+          panelControl.history();
+          return;
+        }
+        openPanel();
+      };
+
+      ctx.slots.inject('conversation.composer.dock', () =>
+        ctx.slots.register(
+          {
+            name: 'conversation.composer.dock',
+            id: 'deepseek-web-chat',
+            order: 2,
+            locale: NS,
+            inject: () => ({ t, openPanel: openMainPanel, openQuick: quickPanel, history: historyStore }),
+          },
+          ComposerDock,
+        ),
+      );
+
+      ctx.slots.inject('settings.section', () =>
+        ctx.slots.register(
+          {
+            name: 'settings.section',
+            id: 'deepseek-web-chat',
+            order: 60,
+            label: () => t('settings.nav'),
+            locale: NS,
+            inject: () => ({ t, openPanel: openMainPanel, openQuick: quickPanel, openHistory: openHistoryPanel }),
+          },
+          SettingsSection,
+        ),
+      );
     }
 
     return {
@@ -8132,6 +8597,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         saveCachedSelectors,
         probeSelectorsInGuest,
         dockPaneById,
+        formatClock,
+        historyStore,
+        ComposerDock,
+        SettingsSection,
         ChatPanel,
         ChatPanelTab,
         createHandoffDelivery,
