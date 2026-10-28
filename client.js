@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.6.11';
+    const PLUGIN_VERSION = '1.7.0';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -246,6 +246,12 @@ window.__ModuleLoader__.load({
       if (!Array.isArray(raw)) return [];
       return raw
         .filter((row) => row !== null && typeof row === 'object' && typeof row.hash === 'string')
+        .map((row) => ({
+          ...row,
+          sourceUrl: normalizeSourceUrl(row.sourceUrl),
+          sourceTitle: typeof row.sourceTitle === 'string' ? row.sourceTitle.slice(0, 160) : '',
+          sessionId: typeof row.sessionId === 'string' ? row.sessionId.slice(0, 200) : '',
+        }))
         .slice(0, HISTORY_LIMIT);
     }
 
@@ -320,6 +326,9 @@ window.__ModuleLoader__.load({
         tokens: Number(entry.tokens) || 0,
         targetTitle: typeof entry.targetTitle === 'string' ? entry.targetTitle : '',
         text: typeof entry.text === 'string' ? entry.text.slice(0, 60000) : '',
+        sourceUrl: normalizeSourceUrl(entry.sourceUrl),
+        sourceTitle: typeof entry.sourceTitle === 'string' ? entry.sourceTitle.slice(0, 160) : '',
+        sessionId: typeof entry.sessionId === 'string' ? entry.sessionId.slice(0, 200) : '',
       };
       const next = [row, ...rows].slice(0, HISTORY_LIMIT);
       saveHistory(next);
@@ -357,7 +366,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function handoffHash(messages, format, template) {
+    function handoffHash(messages, format, template, text) {
       let hash = 2166136261;
       const feed = (value) => {
         const text = String(value || '');
@@ -369,6 +378,13 @@ window.__ModuleLoader__.load({
       feed(format);
       feed('\u0000');
       feed(template);
+      if (typeof text === 'string') {
+        // A redacted handoff hashes its mask signature instead of the rendered
+        // text, which carries a render-time timestamp.
+        feed('\u0002');
+        feed(text);
+        return (hash >>> 0).toString(36);
+      }
       for (const message of Array.isArray(messages) ? messages : []) {
         feed('\u0000');
         feed(message.role);
@@ -606,6 +622,32 @@ window.__ModuleLoader__.load({
       'preview.autoSendHint': '会直接发送到 Harness，不再由你确认。建议先检查最终文本。',
       'preview.send': '插入并发送',
       'preview.export': '导出 .md',
+      'preview.lint.title': '发现 {secret} 处敏感信息 · {injection} 处可疑指令',
+      'preview.lint.hint': '这些内容会随接力进入 agent 上下文，建议先打码。',
+      'preview.lint.mask': '打码',
+      'preview.lint.unmask': '还原',
+      'preview.lint.maskAll': '全部打码',
+      'preview.lint.unmaskAll': '全部还原',
+      'preview.lint.masked': '已打码 {count} 处，插入的是打码后的文本',
+      'preview.lint.more': '还有 {count} 处未列出',
+      'preview.lint.line': '第 {line} 行',
+      'lint.kind.privateKey': '私钥',
+      'lint.kind.apiKey': 'API 密钥',
+      'lint.kind.awsKey': 'AWS 密钥',
+      'lint.kind.githubToken': 'GitHub 令牌',
+      'lint.kind.googleKey': 'Google 密钥',
+      'lint.kind.slackToken': 'Slack 令牌',
+      'lint.kind.jwt': 'JWT 令牌',
+      'lint.kind.bearer': 'Bearer 令牌',
+      'lint.kind.connectionString': '数据库连接串',
+      'lint.kind.credential': '账号口令',
+      'lint.kind.email': '邮箱',
+      'lint.kind.phone': '手机号',
+      'lint.kind.idCard': '身份证号',
+      'lint.kind.privateIp': '内网地址',
+      'lint.kind.localPath': '本机路径',
+      'lint.kind.injection': '可疑指令',
+      'lint.kind.safetyTag': '安全标记冲突',
       'preview.dedupe': '这段内容已接力过：{time}',
       'preview.dedupeHint': '仍然可以再插入一次，或先修改勾选的消息。',
       'preview.summaryRatio': '摘要为原文的 {percent}%',
@@ -633,6 +675,13 @@ window.__ModuleLoader__.load({
       'history.target': '目标',
       'history.meta': '{format} · {chars} 字 · {tokens} tokens',
       'history.copied': '已复制历史内容',
+      'history.openSource': '打开来源',
+      'history.openSourceHint': '在面板中打开这次接力的 DeepSeek 对话',
+      'history.openSession': '回到会话',
+      'history.openSessionHint': '切换到当时接收接力的 Harness 会话',
+      'history.sourceFrom': '来自「{title}」',
+      'history.sourceUnavailable': '这条记录没有可用的来源对话',
+      'history.sessionUnavailable': '无法打开目标会话',
       'history.cleared': '接力历史已清空',
       'reverse.title': '把 Harness 上下文带到 DeepSeek',
       'reverse.desc': '把当前会话、选中的文字或报错填进 DeepSeek 输入框；不会自动发送。',
@@ -884,6 +933,32 @@ window.__ModuleLoader__.load({
       'preview.autoSendHint': 'Sends to Harness without another confirmation. Check the final text first.',
       'preview.send': 'Insert & send',
       'preview.export': 'Export .md',
+      'preview.lint.title': '{secret} sensitive finding(s) · {injection} injection cue(s)',
+      'preview.lint.hint': 'These lines reach the agent on handoff; consider masking them first.',
+      'preview.lint.mask': 'Mask',
+      'preview.lint.unmask': 'Restore',
+      'preview.lint.maskAll': 'Mask all',
+      'preview.lint.unmaskAll': 'Restore all',
+      'preview.lint.masked': '{count} masked; the handoff uses the masked text',
+      'preview.lint.more': '{count} more not listed',
+      'preview.lint.line': 'line {line}',
+      'lint.kind.privateKey': 'Private key',
+      'lint.kind.apiKey': 'API key',
+      'lint.kind.awsKey': 'AWS key',
+      'lint.kind.githubToken': 'GitHub token',
+      'lint.kind.googleKey': 'Google key',
+      'lint.kind.slackToken': 'Slack token',
+      'lint.kind.jwt': 'JWT',
+      'lint.kind.bearer': 'Bearer token',
+      'lint.kind.connectionString': 'Connection string',
+      'lint.kind.credential': 'Credential',
+      'lint.kind.email': 'Email',
+      'lint.kind.phone': 'Phone number',
+      'lint.kind.idCard': 'ID number',
+      'lint.kind.privateIp': 'Private IP',
+      'lint.kind.localPath': 'Local path',
+      'lint.kind.injection': 'Injection cue',
+      'lint.kind.safetyTag': 'Safety tag clash',
       'preview.dedupe': 'This content was handed off before: {time}',
       'preview.dedupeHint': 'You can insert it again, or adjust the selected messages first.',
       'preview.summaryRatio': 'Summary is {percent}% of the transcript',
@@ -911,6 +986,13 @@ window.__ModuleLoader__.load({
       'history.target': 'Target',
       'history.meta': '{format} · {chars} chars · {tokens} tokens',
       'history.copied': 'History item copied',
+      'history.openSource': 'Open source',
+      'history.openSourceHint': 'Open the DeepSeek conversation this handoff came from',
+      'history.openSession': 'Go to session',
+      'history.openSessionHint': 'Switch to the Harness session that received this handoff',
+      'history.sourceFrom': 'from "{title}"',
+      'history.sourceUnavailable': 'This record has no source conversation',
+      'history.sessionUnavailable': 'Could not open the target session',
       'history.cleared': 'Handoff history cleared',
       'reverse.title': 'Bring Harness context to DeepSeek',
       'reverse.desc': 'Fill the DeepSeek composer with the current conversation, selected text or an error. Nothing is sent automatically.',
@@ -1537,6 +1619,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dsc-preview-card {
   width: min(760px, 100%);
   max-height: calc(100% - 16px);
+  overflow: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1851,6 +1934,27 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   line-height: 1.5;
 }
 .dsh-dsc-dedupe strong { color: var(--dsw-alias-label-primary); font-weight: 500; }
+.dsh-dsc-lint {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 9px;
+  border: 0.5px solid color-mix(in srgb, #e5484d 42%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, #e5484d 7%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.dsh-dsc-lint-head { display: flex; align-items: flex-start; gap: 8px; }
+.dsh-dsc-lint-copy { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dsh-dsc-lint-copy strong { color: var(--dsw-alias-label-primary); font-weight: 500; }
+.dsh-dsc-lint-list { display: flex; flex-direction: column; gap: 4px; max-height: 132px; overflow: auto; }
+.dsh-dsc-lint-row { display: flex; align-items: center; gap: 8px; }
+.dsh-dsc-lint-kind { flex: 0 0 auto; color: var(--dsw-alias-label-primary); }
+.dsh-dsc-lint-meta { flex: 1 1 auto; min-width: 0; color: var(--dsw-alias-label-tertiary); }
+.dsh-dsc-lint-row .dsh-dsc-chip { flex: 0 0 auto; }
+.dsh-dsc-lint-summary { color: var(--dsw-alias-label-tertiary); }
 .dsh-dsc-modal-settings {
   width: min(580px, 100%);
   max-height: calc(100% - 24px);
@@ -1965,7 +2069,15 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   font-size: 10.5px;
   line-height: 1.4;
 }
-.dsh-dsc-history-actions { flex: none; display: flex; align-items: center; gap: 4px; }
+.dsh-dsc-history-actions {
+  flex: 0 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+  max-width: 62%;
+}
 .dsh-dsc-history-actions button {
   height: 24px;
   padding: 0 7px;
@@ -2560,6 +2672,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             finish();
           }
         });
+      const pageUrl = (() => {
+        try {
+          const href = typeof location !== 'undefined' && typeof location.href === 'string' ? location.href : '';
+          if (!/^https?:/i.test(href)) return '';
+          return href.split('#')[0].slice(0, 500);
+        } catch (error) {
+          return '';
+        }
+      })();
+      const pageTitle =
+        typeof document !== 'undefined' && typeof document.title === 'string' ? document.title.slice(0, 160) : '';
       const BASE = {
         messages: ['[data-virtual-list-item-key]'],
         assistant: ['.ds-assistant-message-main-content'],
@@ -2704,6 +2827,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           done: true,
           atStart: true,
           checkpoint: null,
+          url: pageUrl,
+          title: pageTitle,
         };
       }
       const first = document.querySelector(ITEM);
@@ -2821,6 +2946,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             done: finished,
             atStart,
             checkpoint: nextCheckpoint,
+            url: pageUrl,
+            title: pageTitle,
           };
         }
         return { ok: false, reason: 'no-messages' };
@@ -2833,6 +2960,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         done: finished,
         atStart,
         checkpoint: nextCheckpoint,
+        url: pageUrl,
+        title: pageTitle,
       };
     }
 
@@ -3177,6 +3306,230 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         }
       }
       return messages.length === 0 ? '' : String(messages[messages.length - 1].text || '').trim();
+    }
+
+    // --- Handoff lint: secrets, PII and prompt-injection cues -----------------
+    const LINT_CATEGORY = Object.freeze({
+      privateKey: 'secret',
+      apiKey: 'secret',
+      awsKey: 'secret',
+      githubToken: 'secret',
+      googleKey: 'secret',
+      slackToken: 'secret',
+      jwt: 'secret',
+      bearer: 'secret',
+      connectionString: 'secret',
+      credential: 'secret',
+      email: 'pii',
+      phone: 'pii',
+      idCard: 'pii',
+      privateIp: 'context',
+      localPath: 'context',
+      injection: 'injection',
+      safetyTag: 'injection',
+    });
+    const LINT_REDACTION = Object.freeze({
+      privateKey: 'PRIVATE_KEY',
+      apiKey: 'API_KEY',
+      awsKey: 'AWS_KEY',
+      githubToken: 'GITHUB_TOKEN',
+      googleKey: 'API_KEY',
+      slackToken: 'SLACK_TOKEN',
+      jwt: 'JWT',
+      bearer: 'BEARER_TOKEN',
+      connectionString: 'CONNECTION_STRING',
+      credential: 'SECRET',
+      email: 'EMAIL',
+      phone: 'PHONE',
+      idCard: 'ID_CARD',
+      privateIp: 'PRIVATE_IP',
+      localPath: 'LOCAL_PATH',
+      injection: 'PROMPT_INJECTION',
+      safetyTag: 'SAFETY_TAG',
+    });
+    const LINT_LIMIT = 200;
+    // Longest / most specific patterns first: a match claims its characters so
+    // a broad rule such as `credential` cannot carve up a private-key block.
+    const LINT_RULES = Object.freeze([
+      {
+        kind: 'privateKey',
+        pattern: '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\\s\\S]{0,4000}?-----END [A-Z0-9 ]*PRIVATE KEY-----',
+        flags: 'g',
+      },
+      { kind: 'apiKey', pattern: '\\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\\b', flags: 'g' },
+      { kind: 'awsKey', pattern: '\\bAKIA[0-9A-Z]{16}\\b', flags: 'g' },
+      { kind: 'githubToken', pattern: '\\bgh[pousr]_[A-Za-z0-9]{20,}\\b', flags: 'g' },
+      { kind: 'googleKey', pattern: '\\bAIza[0-9A-Za-z_-]{35}\\b', flags: 'g' },
+      { kind: 'slackToken', pattern: '\\bxox[baprs]-[A-Za-z0-9-]{10,}\\b', flags: 'g' },
+      { kind: 'jwt', pattern: '\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b', flags: 'g' },
+      { kind: 'bearer', pattern: '\\bBearer\\s+[A-Za-z0-9._~+/=-]{20,}', flags: 'gi' },
+      {
+        kind: 'connectionString',
+        pattern: '\\b(?:mysql|postgres|postgresql|mongodb|mongodb\\+srv|redis|amqp|amqps):\\/\\/[^\\s"<>]{8,}',
+        flags: 'gi',
+      },
+      {
+        kind: 'credential',
+        pattern:
+          '\\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|password|passwd|pwd|secret|token)\\b\\s*[:=]\\s*"?[A-Za-z0-9_\\-./+]{8,}',
+        flags: 'gi',
+      },
+      { kind: 'email', pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}', flags: 'g' },
+      { kind: 'phone', pattern: '(?<!\\d)1[3-9]\\d{9}(?!\\d)', flags: 'g' },
+      { kind: 'idCard', pattern: '(?<!\\d)\\d{17}[\\dXx](?!\\d)', flags: 'g' },
+      {
+        kind: 'privateIp',
+        pattern: '\\b(?:10\\.\\d{1,3}|192\\.168|172\\.(?:1[6-9]|2\\d|3[01]))(?:\\.\\d{1,3}){2}\\b',
+        flags: 'g',
+      },
+      {
+        kind: 'localPath',
+        pattern: '(?:\\/Users\\/|\\/home\\/|\\/root\\/|[A-Za-z]:\\\\Users\\\\)[^\\s"<>|]{1,80}',
+        flags: 'g',
+      },
+      {
+        kind: 'injection',
+        pattern:
+          '(?:\\b(?:ignore|disregard|forget)\\s+(?:all\\s+)?(?:the\\s+)?(?:previous|prior|above|earlier)\\s+(?:instructions?|prompts?|rules?)\\b)|(?:\\b(?:reveal|print|show)\\s+(?:your\\s+)?(?:system\\s+prompt|hidden\\s+prompt)\\b)|(?:(?:忽略|无视|忘记)(?:以上|之前|上面|前面|所有)(?:的)?(?:指令|要求|提示|规则|设定))',
+        flags: 'gi',
+      },
+    ]);
+
+    function lineStartsOf(text) {
+      const starts = [0];
+      for (let index = 0; index < text.length; index += 1) {
+        if (text.charCodeAt(index) === 10) starts.push(index + 1);
+      }
+      return starts;
+    }
+
+    function lineAt(starts, index) {
+      let low = 0;
+      let high = starts.length - 1;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (starts[mid] <= index) low = mid;
+        else high = mid - 1;
+      }
+      return low + 1;
+    }
+
+    /**
+     * Scan handoff text for secrets, personal data and prompt-injection cues.
+     * Findings are ordered by position, never overlap, and carry a stable id
+     * (kind:start:end) so the preview can mask a subset of them.
+     */
+    function lintHandoff(text, options) {
+      const source = typeof text === 'string' ? text : '';
+      if (source === '') return [];
+      const ignoreWrapper = options !== null && typeof options === 'object' && options.wrapper === true;
+      const wrapperOpen = '<' + SAFETY_TAG + '>';
+      const wrapperClose = '</' + SAFETY_TAG + '>';
+      const firstWrapper = ignoreWrapper ? source.indexOf(wrapperOpen) : -1;
+      const lastWrapper = ignoreWrapper ? source.lastIndexOf(wrapperClose) : -1;
+      const taken = new Uint8Array(source.length);
+      const starts = lineStartsOf(source);
+      const findings = [];
+      const rules = LINT_RULES.concat([
+        { kind: 'safetyTag', pattern: '</?' + SAFETY_TAG + '>', flags: 'gi' },
+      ]);
+      for (const rule of rules) {
+        let regex;
+        try {
+          regex = new RegExp(rule.pattern, rule.flags);
+        } catch (error) {
+          continue;
+        }
+        let match;
+        while ((match = regex.exec(source)) !== null) {
+          const value = match[0];
+          if (value === '') {
+            regex.lastIndex += 1;
+            continue;
+          }
+          const start = match.index;
+          const end = start + value.length;
+          if (ignoreWrapper) {
+            // Skip the plugin's own safety wrapper so a normal handoff never
+            // reports itself, while a duplicated tag inside the transcript is
+            // still flagged.
+            if (value === wrapperOpen && start === firstWrapper) continue;
+            if (value === wrapperClose && start === lastWrapper) continue;
+          }
+          let overlap = false;
+          for (let index = start; index < end; index += 1) {
+            if (taken[index] === 1) {
+              overlap = true;
+              break;
+            }
+          }
+          if (!overlap) {
+            for (let index = start; index < end; index += 1) taken[index] = 1;
+            findings.push({
+              id: rule.kind + ':' + start + ':' + end,
+              kind: rule.kind,
+              category: LINT_CATEGORY[rule.kind] || 'secret',
+              start,
+              end,
+              line: lineAt(starts, start),
+              length: value.length,
+            });
+            if (findings.length >= LINT_LIMIT) return findings.sort((left, right) => left.start - right.start);
+          } else {
+            regex.lastIndex = end;
+          }
+        }
+      }
+      return findings.sort((left, right) => left.start - right.start);
+    }
+
+    /**
+     * Replace the selected findings with `[REDACTED:<LABEL>]` markers.
+     * Replacement runs back-to-front so earlier offsets stay valid.
+     */
+    function maskHandoffText(text, findings, maskedIds) {
+      const source = typeof text === 'string' ? text : '';
+      if (!Array.isArray(findings) || findings.length === 0) return source;
+      const selected =
+        maskedIds instanceof Set
+          ? maskedIds
+          : new Set(Array.isArray(maskedIds) ? maskedIds.filter((id) => typeof id === 'string') : []);
+      if (selected.size === 0) return source;
+      const chosen = findings
+        .filter(
+          (finding) =>
+            finding !== null &&
+            typeof finding === 'object' &&
+            selected.has(finding.id) &&
+            Number.isInteger(finding.start) &&
+            Number.isInteger(finding.end) &&
+            finding.start >= 0 &&
+            finding.end > finding.start &&
+            finding.end <= source.length,
+        )
+        .sort((left, right) => right.start - left.start);
+      let output = source;
+      for (const finding of chosen) {
+        const label = LINT_REDACTION[finding.kind] || 'SECRET';
+        output = output.slice(0, finding.start) + '[REDACTED:' + label + ']' + output.slice(finding.end);
+      }
+      return output;
+    }
+
+    /** Keep only absolute http(s) sources; strips the fragment and credentials. */
+    function normalizeSourceUrl(value) {
+      if (typeof value !== 'string') return '';
+      const raw = value.trim();
+      if (raw === '' || raw.length > 1000) return '';
+      try {
+        const url = new URL(raw);
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+        if (url.username !== '' || url.password !== '') return '';
+        url.hash = '';
+        return url.href.slice(0, 500);
+      } catch (error) {
+        return '';
+      }
     }
 
     function formatHandoff(messages, mode, truncated, t, options) {
@@ -4937,6 +5290,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 tokens,
                 targetTitle: payload.targetTitle,
                 text: payload.text,
+                sourceUrl: payload.sourceUrl,
+                sourceTitle: payload.sourceTitle,
+                sessionId: delivered.sessionId,
               }),
             );
             const sendNow = payload.autoSend === true;
@@ -5077,6 +5433,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               showToast(handoffErrorText('no-messages'));
               return;
             }
+            const sourceUrl = normalizeSourceUrl(result.url);
+            const sourceTitle = cleanPageTitle(result.title);
             const targets = typeof listTargets === 'function' ? listTargets() : [];
             const current =
               delivery !== null && delivery !== undefined && typeof delivery.currentSessionId === 'function'
@@ -5115,6 +5473,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               autoSend: defaults.autoSend,
               insertPosition: 'end',
               insertion,
+              sourceUrl,
+              sourceTitle,
+              maskedIds: [],
             });
             track('dsc_handoff_preview', { duration_ms: Math.max(0, Date.now() - startedAt) });
           } catch (cause) {
@@ -5166,6 +5527,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             return {
               ...current,
               messages: merged,
+              maskedIds: [],
               truncated: !done || !atStart,
               capture: {
                 done,
@@ -5686,6 +6048,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           if (current === null) return current;
           return {
             ...current,
+            maskedIds: [],
             messages: current.messages.map((message, position) =>
               position === index ? { ...message, selected: !message.selected } : message,
             ),
@@ -5698,6 +6061,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           if (current === null) return current;
           return {
             ...current,
+            maskedIds: [],
             messages: current.messages.map((message) => ({
               ...message,
               selected:
@@ -5718,7 +6082,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const previewTemplate =
         preview === null || !HANDOFF_TEMPLATES.includes(preview.template) ? 'none' : preview.template;
       const previewInsertPosition = preview === null ? 'end' : preview.insertPosition === 'cursor' ? 'cursor' : 'end';
-      const previewText =
+      const previewBaseText =
         preview === null || previewSelected.length === 0
           ? ''
           : formatHandoff(previewSelected, preview.mode, preview.truncated, t, {
@@ -5726,10 +6090,53 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               format: previewFormat,
               template: previewTemplate,
             });
+      const previewFindings =
+        previewBaseText === ''
+          ? []
+          : lintHandoff(previewBaseText, { wrapper: preview !== null && preview.safety === true });
+      const previewMaskedIds =
+        preview !== null && Array.isArray(preview.maskedIds)
+          ? preview.maskedIds.filter((id) => typeof id === 'string')
+          : [];
+      const previewMaskedSet = new Set(
+        previewMaskedIds.filter((id) => previewFindings.some((finding) => finding.id === id)),
+      );
+      const previewText =
+        previewMaskedSet.size === 0
+          ? previewBaseText
+          : maskHandoffText(previewBaseText, previewFindings, previewMaskedSet);
+      const previewSecretCount = previewFindings.filter((finding) => finding.category !== 'injection').length;
+      const previewInjectionCount = previewFindings.length - previewSecretCount;
+      const previewAllMasked =
+        previewFindings.length > 0 && previewFindings.every((finding) => previewMaskedSet.has(finding.id));
+      const toggleMask = (id) => {
+        setPreview((current) => {
+          if (current === null) return current;
+          const ids = Array.isArray(current.maskedIds) ? current.maskedIds.filter((value) => typeof value === 'string') : [];
+          return {
+            ...current,
+            maskedIds: ids.includes(id) ? ids.filter((value) => value !== id) : ids.concat(id),
+          };
+        });
+      };
+      const toggleAllMask = () => {
+        if (previewFindings.length === 0) return;
+        setPreview((current) => {
+          if (current === null) return current;
+          const ids = Array.isArray(current.maskedIds) ? current.maskedIds.filter((value) => typeof value === 'string') : [];
+          const all = previewFindings.map((finding) => finding.id);
+          return { ...current, maskedIds: all.every((id) => ids.includes(id)) ? [] : all };
+        });
+      };
       const previewChars = previewText.length;
       const previewTokens = previewText === '' ? 0 : estimateTokens(previewText);
       const previewRawChars = previewSelected.reduce((sum, message) => sum + String(message.text || '').length, 0);
-      const previewHash = handoffHash(previewSelected, previewFormat, previewTemplate);
+      const previewHash = handoffHash(
+        previewSelected,
+        previewFormat,
+        previewTemplate,
+        previewMaskedSet.size === 0 ? undefined : Array.from(previewMaskedSet).sort().join('|'),
+      );
       const dedupeMatch =
         preview !== null && settings.dedupe ? history.find((row) => row.hash === previewHash) : undefined;
       const previewTarget =
@@ -5758,6 +6165,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           truncated: preview.truncated === true,
           messages: previewSelected.map((message) => ({ role: message.role, text: message.text })),
           hash: previewHash,
+          sourceUrl: preview.sourceUrl === undefined ? '' : preview.sourceUrl,
+          sourceTitle: preview.sourceTitle === undefined ? '' : preview.sourceTitle,
           insertPosition: previewInsertPosition === 'cursor' && preview.insertion ? 'cursor' : 'end',
           insertion: preview.insertion === undefined || preview.insertion === null ? null : preview.insertion,
         });
@@ -5992,9 +6401,81 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             autoSend: false,
             insertPosition: 'end',
             insertion: null,
+            sourceUrl: normalizeSourceUrl(row.sourceUrl),
+            sourceTitle: typeof row.sourceTitle === 'string' ? row.sourceTitle : '',
+            maskedIds: [],
           });
         },
         [delivery, listTargets],
+      );
+
+      const openHistorySource = React.useCallback(
+        (row) => {
+          const url = normalizeSourceUrl(row === null || row === undefined ? '' : row.sourceUrl);
+          setHistoryOpen(false);
+          if (url === '') {
+            showToast(t('history.sourceUnavailable'));
+            return;
+          }
+          let sameOrigin = false;
+          try {
+            sameOrigin = new URL(url).origin === new URL(TARGET).origin;
+          } catch (error) {
+            sameOrigin = false;
+          }
+          const view = viewRef.current;
+          if (!sameOrigin || view === null || typeof view.loadURL !== 'function') {
+            try {
+              window.open(url, '_blank', 'noopener,noreferrer');
+            } catch (error) {
+              showToast(t('history.sourceUnavailable'));
+            }
+            return;
+          }
+          try {
+            const loading = view.loadURL(url);
+            if (loading !== undefined && loading !== null && typeof loading.catch === 'function') {
+              loading.catch((cause) => {
+                if (cause !== null && typeof cause === 'object' && cause.code === 'ERR_ABORTED') return;
+                if (String(cause).includes('ERR_ABORTED')) return;
+                setError(cause instanceof Error ? cause.message : '');
+                setPhase('error');
+              });
+            }
+            track('dsc_history_source', {});
+          } catch (cause) {
+            showToast(t('history.sourceUnavailable'));
+          }
+        },
+        [showToast, t],
+      );
+
+      const goToHistorySession = React.useCallback(
+        (row) => {
+          const sessionId =
+            row !== null && row !== undefined && typeof row.sessionId === 'string' ? row.sessionId : '';
+          setHistoryOpen(false);
+          if (sessionId === '') {
+            showToast(t('history.sessionUnavailable'));
+            return;
+          }
+          let revealed = false;
+          try {
+            revealed =
+              delivery !== null &&
+              delivery !== undefined &&
+              typeof delivery.reveal === 'function' &&
+              delivery.reveal(sessionId) === true;
+          } catch (error) {
+            revealed = false;
+          }
+          if (!revealed) {
+            showToast(t('history.sessionUnavailable'));
+            return;
+          }
+          track('dsc_history_session', {});
+        },
+        [delivery, showToast, t],
       );
 
       const copyHistory = React.useCallback(
@@ -6187,7 +6668,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                             className: 'dsh-dsc-chip',
                             'data-active': previewFormat === format ? 'true' : undefined,
                             onClick: () =>
-                              setPreview((current) => (current === null ? current : { ...current, format })),
+                              setPreview((current) =>
+                                current === null ? current : { ...current, format, maskedIds: [] },
+                              ),
                           },
                           t('preview.format.' + format),
                         ),
@@ -6205,7 +6688,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                           onChange: (event) => {
                             const value = event.target.value;
                             setPreview((current) =>
-                              current === null ? current : { ...current, template: value },
+                              current === null ? current : { ...current, template: value, maskedIds: [] },
                             );
                           },
                         },
@@ -6287,6 +6770,76 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     preview.showText ? t('preview.hideText') : t('preview.viewText'),
                   ),
                 ),
+                previewFindings.length === 0
+                  ? null
+                  : h(
+                      'div',
+                      { className: 'dsh-dsc-lint', role: 'status' },
+                      h(
+                        'div',
+                        { className: 'dsh-dsc-lint-head' },
+                        h(
+                          'span',
+                          { className: 'dsh-dsc-lint-copy' },
+                          h(
+                            'strong',
+                            null,
+                            t('preview.lint.title', {
+                              secret: previewSecretCount,
+                              injection: previewInjectionCount,
+                            }),
+                          ),
+                          h('small', null, t('preview.lint.hint')),
+                        ),
+                        h(
+                          'button',
+                          { type: 'button', className: 'dsh-dsc-chip', onClick: toggleAllMask },
+                          previewAllMasked ? t('preview.lint.unmaskAll') : t('preview.lint.maskAll'),
+                        ),
+                      ),
+                      h(
+                        'div',
+                        { className: 'dsh-dsc-lint-list' },
+                        previewFindings.slice(0, 12).map((finding) =>
+                          h(
+                            'div',
+                            { key: finding.id, className: 'dsh-dsc-lint-row' },
+                            h('span', { className: 'dsh-dsc-lint-kind' }, t('lint.kind.' + finding.kind)),
+                            h(
+                              'span',
+                              { className: 'dsh-dsc-lint-meta' },
+                              t('preview.lint.line', { line: finding.line }) + ' · ' + finding.length,
+                            ),
+                            h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'dsh-dsc-chip',
+                                'data-active': previewMaskedSet.has(finding.id) ? 'true' : undefined,
+                                onClick: () => toggleMask(finding.id),
+                              },
+                              previewMaskedSet.has(finding.id)
+                                ? t('preview.lint.unmask')
+                                : t('preview.lint.mask'),
+                            ),
+                          ),
+                        ),
+                      ),
+                      previewFindings.length > 12
+                        ? h(
+                            'small',
+                            { className: 'dsh-dsc-lint-summary' },
+                            t('preview.lint.more', { count: previewFindings.length - 12 }),
+                          )
+                        : null,
+                      previewMaskedSet.size === 0
+                        ? null
+                        : h(
+                            'small',
+                            { className: 'dsh-dsc-lint-summary' },
+                            t('preview.lint.masked', { count: previewMaskedSet.size }),
+                          ),
+                    ),
                 preview.capture !== undefined && preview.capture !== null && preview.capture.done !== true
                   ? h(
                       'div',
@@ -6349,7 +6902,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                       type: 'checkbox',
                       checked: preview.safety,
                       onChange: () =>
-                        setPreview((current) => (current === null ? current : { ...current, safety: !current.safety })),
+                        setPreview((current) =>
+                          current === null ? current : { ...current, safety: !current.safety, maskedIds: [] },
+                        ),
                     }),
                     h('span', null, t('preview.safety'), h('small', null, t('preview.safetyHint'))),
                   ),
@@ -6769,12 +7324,37 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                                 format: t('preview.format.' + (HANDOFF_FORMATS.includes(row.format) ? row.format : 'raw')),
                                 chars: row.chars,
                                 tokens: row.tokens,
-                              }),
+                              }) +
+                              (typeof row.sourceTitle === 'string' && row.sourceTitle !== ''
+                                ? ' · ' + t('history.sourceFrom', { title: row.sourceTitle.slice(0, 40) })
+                                : ''),
                           ),
                         ),
                         h(
                           'div',
                           { className: 'dsh-dsc-history-actions' },
+                          typeof row.sourceUrl === 'string' && row.sourceUrl !== ''
+                            ? h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  title: t('history.openSourceHint'),
+                                  onClick: () => openHistorySource(row),
+                                },
+                                t('history.openSource'),
+                              )
+                            : null,
+                          typeof row.sessionId === 'string' && row.sessionId !== ''
+                            ? h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  title: t('history.openSessionHint'),
+                                  onClick: () => goToHistorySession(row),
+                                },
+                                t('history.openSession'),
+                              )
+                            : null,
                           h('button', { type: 'button', onClick: () => void copyHistory(row) }, t('history.copy')),
                           h('button', { type: 'button', onClick: () => exportHistory(row) }, t('preview.export')),
                           h('button', { type: 'button', onClick: () => reuseHistory(row) }, t('history.reuse')),
@@ -7503,6 +8083,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         conclusionOf,
         templateDirective,
         handoffHash,
+        lintHandoff,
+        maskHandoffText,
+        normalizeSourceUrl,
         cleanPageTitle,
         clampDockWidth,
         dockGeometry,

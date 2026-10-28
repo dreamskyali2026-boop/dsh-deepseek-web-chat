@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V1.6.11　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V1.7.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -57,9 +57,17 @@
 
 ![接力按钮位置](./handoff-button.png)
 
+### 接力前体检（敏感信息与可疑指令）
+
+- 预览打开时会扫描最终文本，命中后顶部出现体检条：几处敏感信息（API 密钥、私钥、账号口令、JWT、数据库连接串、邮箱、手机号、身份证号、内网地址、本机路径）与几处可疑指令（「忽略以上指令」类话术、与安全标记同名的标签）。
+- 每一条可按「打码」替换为 `[REDACTED:标签]` 占位，也可「全部打码」；再点一次「还原」即可撤销。打码后的文本才会被插入、复制、导出，字符数与 token 估算同步更新。
+- 体检只在本地用正则完成，不联网、不发送内容；安全标记包裹本身不会被误报，只有对话正文里出现的同名标签才会提示。
+- 改动交接格式、模板、勾选消息或安全标记后，打码状态会重置，避免占位符与旧偏移错位。
+
 ### 历史与去重
 
 - 每次成功接力会记录格式、模板、目标会话、字符数、token、来源和时间；在接力菜单的「接力历史…」里可以再次接力、复制、删除或清空。
+- 记录同时保存**来源对话地址**与**目标 Harness 会话**：历史行可「打开来源」回到那次 DeepSeek 对话，或「回到会话」切到当时接收接力的 Harness 会话；旧版本记录缺少这两项时按钮不显示，不影响既有功能。
 - 历史只存在本机浏览器存储，最多 20 条，不上传。
 - 同一段内容（按消息 + 格式 + 模板计算 hash）再次接力时，预览顶部会提示上次接力时间，仍可选择「仍然插入」。
 - 历史支持按目标会话、正文、格式、模板搜索。
@@ -111,11 +119,11 @@
 - `package.json`：bundle 与客户端模块清单
 - `cordis.patch.yml`：向 profile 插入插件行
 - `index.js`：Host 侧空实现（功能全部在客户端）
-- `client.js`：侧栏图标、主内容区聊天面板、并排停靠、嵌入式浏览器租约、接力预览、结构化摘要、历史去重、反向接力、通知、设置与诊断
-- `tests/pure.test.mjs`：纯函数单测（接力范围、格式化、摘要、模板、hash、设置、历史、诊断、guest 探针、token 估算）
+- `client.js`：侧栏图标、主内容区聊天面板、并排停靠、嵌入式浏览器租约、接力预览、接力前体检与打码、结构化摘要、历史去重与双向回跳、反向接力、通知、设置与诊断
+- `tests/pure.test.mjs`：纯函数单测（接力范围、格式化、摘要、模板、hash、设置、历史、体检与打码、来源清洗、诊断、guest 探针、token 估算）
 - `locale/*.json`：插件管理器中显示的名称与说明
 - `icon.svg`：插件图标，使用 DeepSeek 官方网页 favicon 中的鲸鱼标记（<https://fe-static.deepseek.com/chat/favicon.svg>），仅用于标识 DeepSeek 网页聊天入口
-- `待开发需求.md`：V1.6 / V2 待开发需求与优先级
+- `待开发需求.md`：V1.7 / V2 待开发需求与优先级
 - `.github/workflows/test.yml`：GitHub Actions 单测 CI
 - `native-sidebar.png`：原生右侧栏并排效果图（README 顶部）
 - `screenshot.png`：V1.2 全屏面板效果图（留档）
