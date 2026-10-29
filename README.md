@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V2.2.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)　·　许可证：[MIT](./LICENSE)
+> 作者：Dream　·　当前版本：V2.3.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)　·　许可证：[MIT](./LICENSE)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -108,6 +108,15 @@ V1.9 只负责把回复**发去** DeepSeek 复核；V2.1 把流程闭起来—�
 - 没有接力记录、切换了对话，或上次位置已不在可抓取范围时，会明确提示改用整段接力；上次之后没有新消息时也会直接提示，不会打开空预览。
 - 检查点只在本机保存，可在设置页「清空本地数据」时一并清除。
 
+### 自定义任务模板（V2.3）
+
+- 设置页新增「自定义任务模板」：可新增、改名、编辑内容、上移/下移、删除；内容为空的模板不会出现在接力预览的选择器里，名称留空时显示为「未命名模板」。
+- 模板会作为「任务指令」追加到接力内容末尾，和内置的「按此实现 / 先给计划 / 代码审查 / 作为 /goal / 作为 /plan」并列显示在「自定义模板」分组下。
+- 支持变量：`{{selection}}` 最近一次 Harness 选区、`{{title}}` 目标会话标题、`{{source}}` DeepSeek 对话标题、`{{date}}` 当前日期。未取到的变量会替换为空；不认识的占位符保持原样。
+- 模板保存在独立的本地键里，「恢复默认设置」不会删除；「清空本地数据」会一并清除。
+- 支持导出/导入 JSON：导出文件包含 `{ version, templates }`，导入按 id 合并（同 id 覆盖，其余追加），最多保存 20 个。
+- 模板内容上限 4,000 字符，名称上限 40 字符；预览里的字符数/token 估算会包含指令和变量展开后的文本。
+
 ### 历史与去重
 
 - 每次成功接力会记录格式、模板、目标会话、字符数、token、来源和时间；在接力菜单的「接力历史…」里可以再次接力、复制、删除或清空。
@@ -172,7 +181,7 @@ V1.9 只负责把回复**发去** DeepSeek 复核；V2.1 把流程闭起来—�
 - `package.json`：bundle 与客户端模块清单
 - `cordis.patch.yml`：向 profile 插入插件行
 - `index.js`：Host 半：认证路由 `POST /api/deepseek-web-chat.message`，用 `sessionQuery` 读取指定 assistant 消息的可见文本块（复核功能的数据来源）
-- `client.js`：侧栏图标、主内容区聊天面板、并排停靠、嵌入式浏览器租约、接力预览与编辑、接力前体检与打码、抓取保真、结构化摘要、增量接力检查点、历史去重与双向回跳、反向接力与新对话、Quick Ask 提问条与尺寸记忆、输入框状态条、原生设置页、「发给 DeepSeek 复核」与复核回填、版本与更新检查、通知、诊断
+- `client.js`：侧栏图标、主内容区聊天面板、并排停靠、嵌入式浏览器租约、接力预览与编辑、接力前体检与打码、抓取保真、结构化摘要、增量接力检查点、自定义任务模板与变量、历史去重与双向回跳、反向接力与新对话、Quick Ask 提问条与尺寸记忆、输入框状态条、原生设置页、「发给 DeepSeek 复核」与复核回填、版本与更新检查、通知、诊断
 - `tests/pure.test.mjs`：纯函数与渲染单测（接力范围、格式化、摘要、模板、hash、设置、历史、体检与打码、来源清洗、诊断、guest 探针、token 估算、复核提示词与队列、SemVer 与更新检查、Quick Ask 几何与提问条、新对话填入重试）
 - `LICENSE`：MIT 许可证
 - `tests/host.test.mjs`：Host 半单测（路由注册、消息提取、截断、错误码、观察租约释放）
@@ -190,7 +199,7 @@ V1.9 只负责把回复**发去** DeepSeek 复核；V2.1 把流程闭起来—�
 npm test
 ```
 
-单测通过 Node 内置测试运行器加载 `client.js` 的 `__test` 导出，不需要启动 Harness。GitHub Actions 会在 push / PR 时用 Node 22 与 24 两个版本运行 `npm run check` 与 `npm test`（当前 105 个用例）。
+单测通过 Node 内置测试运行器加载 `client.js` 的 `__test` 导出，不需要启动 Harness。GitHub Actions 会在 push / PR 时用 Node 22 与 24 两个版本运行 `npm run check` 与 `npm test`（当前 111 个用例）。
 
 只改 `client.js` 时，刷新 Harness 页面即可加载新代码；改动 `index.js`（Host 半、认证路由）需要重启 Harness。
 
@@ -199,6 +208,7 @@ npm test
 - 内嵌网页依赖桌面端 preload 暴露的 `dshDesktop.browser` 租约接口。若未来客户端移除或修改该接口，插件会显示「当前环境不支持内嵌网页」，此时仍可使用「在浏览器中打开」；插件本身不会影响 Harness 启动。
 - 快捷键依赖 DSH 的 `shortcuts` 服务；若快捷键注册冲突，插件会跳过绑定并在控制台告警，不影响面板使用。
 - `package.json` 已声明 `dsh.manifestVersion`、`engines.node`、`engines.dsh`、`license`（MIT）与仓库信息，便于发布到插件市场；`private` 已关闭，但仍保留 `@local/` 名称，正式发布前需要换成市场要求的包名。
-- V2.2.0 是纯客户端增量（`index.js` 未改），刷新页面即可使用；增量接力检查点只读写本机 `localStorage`，不新增网络请求。
+- V2.3.0 是纯客户端增量（`index.js` 未改），刷新页面即可使用；自定义模板只读写本机 `localStorage`，导入/导出不联网。
+- V2.2.0 同样未改 Host 半；增量接力检查点只读写本机 `localStorage`。
 - V2.1.0 同样未改 Host 半；复核回填只读写本机 `localStorage`。
 - V2.0.0 引入的更新检查会请求 GitHub Raw 上的 `package.json`，不可达时只显示「检查更新失败」，不影响其他功能。

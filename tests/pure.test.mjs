@@ -42,6 +42,17 @@ const {
   estimateTokens,
   selectHandoffMessages,
   formatHandoff,
+  normalizeCustomTemplate,
+  normalizeCustomTemplates,
+  loadCustomTemplates,
+  saveCustomTemplates,
+  newCustomTemplateId,
+  customTemplateById,
+  isKnownHandoffTemplate,
+  applyTemplateVariables,
+  serializeTemplateBundle,
+  parseTemplateBundle,
+  mergeCustomTemplates,
   buildStructuredSummary,
   handoffHash,
   lintHandoff,
@@ -659,6 +670,10 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
     assert.match(flat, /reverse\.title/);
     assert.match(flat, /reverse\.target/);
     assert.match(flat, /settings\.about/);
+    assert.match(flat, /settings\.templates/);
+    assert.match(flat, /settings\.templateAdd/);
+    assert.match(flat, /settings\.templateVars/);
+    assert.match(flat, /settings\.templatesEmpty/);
   } finally {
     globalThis.window = previousWindow;
   }
@@ -981,7 +996,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '2.2.0');
+  assert.equal(parsed.version, '2.3.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -2290,8 +2305,8 @@ test('update records are validated, persisted and published', () => {
   assert.equal(normalizeUpdateRecord({ ok: true, version: '1.2.3' }), null);
   assert.equal(normalizeUpdateRecord(null), null);
   assert.equal(updateStatusOf(null), 'unchecked');
-  assert.equal(updateStatusOf({ ok: true, version: '2.3.0', checkedAt: 1 }), 'available');
-  assert.equal(updateStatusOf({ ok: true, version: '2.2.0', checkedAt: 1 }), 'current');
+  assert.equal(updateStatusOf({ ok: true, version: '2.4.0', checkedAt: 1 }), 'available');
+  assert.equal(updateStatusOf({ ok: true, version: '2.3.0', checkedAt: 1 }), 'current');
   assert.equal(updateStatusOf({ ok: false, version: '', checkedAt: 1 }), 'error');
 
   let notifications = 0;
@@ -2334,7 +2349,7 @@ test('refreshUpdate caches a fresh result and records failures', async () => {
   let calls = 0;
   const manifest = async () => {
     calls += 1;
-    return { ok: true, json: async () => ({ version: '2.3.0' }) };
+    return { ok: true, json: async () => ({ version: '2.4.0' }) };
   };
   assert.equal(await refreshUpdate({ force: true, fetch: manifest }), 'available');
   assert.equal(calls, 1);
@@ -2348,11 +2363,11 @@ test('refreshUpdate caches a fresh result and records failures', async () => {
 
 test('updateStatusText explains cached states without leaking anything', () => {
   const available = updateStatusText(
-    { ok: true, version: '2.3.0', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
+    { ok: true, version: '2.4.0', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
     t,
   );
   assert.match(available, /settings\.updateAvailable/);
-  assert.match(available, /version=2\.3\.0/);
+  assert.match(available, /version=2\.4\.0/);
   assert.equal(updateStatusText(null, t), 'settings.updateUnchecked');
   assert.equal(updateStatusText({ ok: false, version: '', checkedAt: 1, error: 'x' }, t), 'settings.updateError');
 });
@@ -3080,7 +3095,7 @@ test('preview labels an incremental handoff and its checkpoint time', () => {
           targets: [{ id: 's1', title: '当前会话' }],
           targetSessionId: 's1',
           format: 'raw',
-          template: 'none',
+          template: 'custom:test-1',
           safety: true,
           showText: true,
           returnToHarness: true,
@@ -3117,6 +3132,9 @@ test('preview labels an incremental handoff and its checkpoint time', () => {
   const previousWindow = globalThis.window;
   globalThis.window = { ...previousWindow, innerWidth: 1400, innerHeight: 900 };
   try {
+    saveCustomTemplates([
+      { id: 'custom:test-1', name: '目标模板', prompt: '目标 {{title}}' },
+    ]);
     const panel = ChatPanel({
       back() {},
       open() {},
@@ -3135,7 +3153,104 @@ test('preview labels an incremental handoff and its checkpoint time', () => {
     assert.match(flat, /handoff\.delta\.badge/);
     assert.match(flat, /handoff\.delta\.banner/);
     assert.match(flat, /handoff\.menu\.delta/);
+    assert.match(flat, /preview\.template\.customGroup/);
+    assert.match(flat, /目标模板/);
+    assert.match(flat, /目标 当前会话/);
   } finally {
+    saveCustomTemplates([]);
     globalThis.window = previousWindow;
+  }
+});
+
+// --- V2.3: custom task templates -------------------------------------------
+
+test('custom templates validate, dedupe and cap their list', () => {
+  assert.deepEqual(normalizeCustomTemplate({ id: 'custom:fix-1', name: ' 修复 ', prompt: 'x' }), {
+    id: 'custom:fix-1',
+    name: '修复',
+    prompt: 'x',
+  });
+  assert.equal(normalizeCustomTemplate({ id: 'bad', name: 'x', prompt: 'y' }), null);
+  assert.equal(normalizeCustomTemplate({ id: 'custom:fix-1', prompt: 42 }), null);
+  const rows = normalizeCustomTemplates([
+    { id: 'custom:a-1', name: 'A', prompt: 'a' },
+    { id: 'custom:a-1', name: 'A2', prompt: 'a2' },
+    { id: 'custom:b-2', name: 'B', prompt: 'b' },
+  ]);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].name, 'A');
+  const many = Array.from({ length: 25 }, (_, index) => ({
+    id: 'custom:t-' + index,
+    name: 'T' + index,
+    prompt: 'p',
+  }));
+  assert.equal(normalizeCustomTemplates(many).length, 20);
+});
+
+test('new custom template ids are unique and match the accepted shape', () => {
+  const first = newCustomTemplateId([]);
+  assert.match(first, /^custom:[a-z0-9-]+$/);
+  const second = newCustomTemplateId([{ id: first, name: '', prompt: '' }]);
+  assert.notEqual(first, second);
+});
+
+test('template variables replace known placeholders and keep unknown ones', () => {
+  assert.equal(
+    applyTemplateVariables('修 {{selection}} / {{TITLE}} / {{source}} / {{date}} / {{missing}}', {
+      selection: 'TypeError: x',
+      title: '会话 A',
+      source: '讨论 B',
+      date: '2026-10-29',
+    }),
+    '修 TypeError: x / 会话 A / 讨论 B / 2026-10-29 / {{missing}}',
+  );
+  assert.equal(applyTemplateVariables('{{title}}', {}), '');
+  assert.equal(applyTemplateVariables('plain', {}), 'plain');
+});
+
+test('formatHandoff appends a custom directive with substituted variables', () => {
+  const templates = [{ id: 'custom:fix-1', name: '修复', prompt: '修复报错：{{selection}}' }];
+  const text = formatHandoff([{ role: 'user', text: '讨论' }], 'all', false, t, {
+    safety: false,
+    format: 'raw',
+    template: 'custom:fix-1',
+    customTemplates: templates,
+    variables: { selection: 'TypeError: x' },
+  });
+  assert.match(text, /修复报错：TypeError: x/);
+  assert.equal(text.includes('custom:fix-1'), false);
+  assert.equal(isKnownHandoffTemplate('custom:fix-1', templates), true);
+  assert.equal(isKnownHandoffTemplate('custom:missing', templates), false);
+  assert.equal(customTemplateById('custom:fix-1', templates).name, '修复');
+});
+
+test('template bundles serialize, parse and merge by id', () => {
+  const templates = [{ id: 'custom:fix-1', name: '修复', prompt: 'p' }];
+  const parsed = parseTemplateBundle(serializeTemplateBundle(templates));
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].id, 'custom:fix-1');
+  assert.equal(parseTemplateBundle('not json'), null);
+  assert.equal(parseTemplateBundle('{"version":1}'), null);
+  const imported = parseTemplateBundle(JSON.stringify([{ name: '无 id', prompt: 'p' }]));
+  assert.match(imported[0].id, /^custom:import-0-/);
+  const merged = mergeCustomTemplates(templates, [
+    { id: 'custom:fix-1', name: '覆盖', prompt: 'p2' },
+    { id: 'custom:new-1', name: '新', prompt: 'p3' },
+  ]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].name, '覆盖');
+});
+
+test('custom templates persist separately from settings', () => {
+  const previous = globalThis.window;
+  globalThis.window = fakeWindow;
+  try {
+    saveCustomTemplates([{ id: 'custom:s-1', name: '存放', prompt: 'p' }]);
+    assert.equal(loadCustomTemplates()[0].name, '存放');
+    saveCustomTemplates([]);
+    assert.equal(loadCustomTemplates().length, 0);
+  } finally {
+    saveCustomTemplates([]);
+    globalThis.window = previous;
   }
 });

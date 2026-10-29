@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-deepseek-web-chat",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "private": false,
   "type": "module",
   "author": "Dream",

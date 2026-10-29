@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '2.2.0';
+    const PLUGIN_VERSION = '2.3.0';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -56,6 +56,11 @@ window.__ModuleLoader__.load({
     const REVIEW_STATUSES = ['waiting', 'ready'];
     const CHECKPOINT_KEY = 'dsh-deepseek-web-chat.handoff-checkpoint.v1';
     const CHECKPOINT_LIMIT = 50;
+    const TEMPLATES_KEY = 'dsh-deepseek-web-chat.templates.v1';
+    const CUSTOM_TEMPLATE_LIMIT = 20;
+    const CUSTOM_TEMPLATE_NAME_MAX = 40;
+    const CUSTOM_TEMPLATE_PROMPT_MAX = 4000;
+    const CUSTOM_TEMPLATE_ID = /^custom:[a-z0-9-]{1,40}$/;
     const QUICK_MIN_WIDTH = 320;
     const QUICK_MIN_HEIGHT = 320;
     const NEW_CHAT_FILL_ATTEMPTS = 12;
@@ -827,7 +832,10 @@ window.__ModuleLoader__.load({
         source: 'DeepSeek Web Chat',
         hash: String(entry.hash),
         format: HANDOFF_FORMATS.includes(entry.format) ? entry.format : 'raw',
-        template: HANDOFF_TEMPLATES.includes(entry.template) ? entry.template : 'none',
+        template:
+          HANDOFF_TEMPLATES.includes(entry.template) || CUSTOM_TEMPLATE_ID.test(entry.template)
+            ? entry.template
+            : 'none',
         messages: Array.isArray(entry.messages)
           ? entry.messages.map((message) => ({ role: message.role, text: String(message.text || '') }))
           : [],
@@ -989,7 +997,95 @@ window.__ModuleLoader__.load({
       return (hash >>> 0).toString(36);
     }
 
-    function templateDirective(template, t) {
+    // --- Custom templates (V2.3) --------------------------------------------
+    // Task instructions are user-editable. They are stored separately from
+    // settings so "reset to defaults" never deletes authored prompts.
+
+    function normalizeCustomTemplate(value) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+      const id = typeof value.id === 'string' ? value.id.trim() : '';
+      if (!CUSTOM_TEMPLATE_ID.test(id)) return null;
+      if (value.name !== undefined && typeof value.name !== 'string') return null;
+      if (value.prompt !== undefined && typeof value.prompt !== 'string') return null;
+      return {
+        id,
+        name:
+          typeof value.name === 'string'
+            ? value.name.trim().slice(0, CUSTOM_TEMPLATE_NAME_MAX)
+            : '',
+        prompt:
+          typeof value.prompt === 'string'
+            ? value.prompt.slice(0, CUSTOM_TEMPLATE_PROMPT_MAX)
+            : '',
+      };
+    }
+
+    function normalizeCustomTemplates(value) {
+      if (!Array.isArray(value)) return [];
+      const rows = [];
+      const seen = new Set();
+      for (const entry of value) {
+        const row = normalizeCustomTemplate(entry);
+        if (row === null || seen.has(row.id)) continue;
+        seen.add(row.id);
+        rows.push(row);
+        if (rows.length >= CUSTOM_TEMPLATE_LIMIT) break;
+      }
+      return rows;
+    }
+
+    function loadCustomTemplates() {
+      return normalizeCustomTemplates(readJson(TEMPLATES_KEY, []));
+    }
+
+    function saveCustomTemplates(value) {
+      const rows = normalizeCustomTemplates(value);
+      writeJson(TEMPLATES_KEY, rows);
+      return rows;
+    }
+
+    function newCustomTemplateId(existing) {
+      const used = new Set(normalizeCustomTemplates(existing).map((row) => row.id));
+      let id = '';
+      do {
+        id = 'custom:' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      } while (used.has(id));
+      return id;
+    }
+
+    function customTemplateById(id, templates) {
+      if (typeof id !== 'string' || !CUSTOM_TEMPLATE_ID.test(id)) return null;
+      for (const row of Array.isArray(templates) ? templates : []) {
+        const template = normalizeCustomTemplate(row);
+        if (template !== null && template.id === id) return template;
+      }
+      return null;
+    }
+
+    function isKnownHandoffTemplate(id, templates) {
+      if (HANDOFF_TEMPLATES.includes(id)) return true;
+      const row = customTemplateById(id, templates);
+      return row !== null && row.prompt.trim() !== '';
+    }
+
+    /**
+     * Replace known `{{variable}}` placeholders; unknown placeholders stay
+     * untouched so a typo is visible instead of silently disappearing.
+     */
+    function applyTemplateVariables(text, values) {
+      const source = typeof text === 'string' ? text : '';
+      const map = values !== null && typeof values === 'object' ? values : {};
+      return source.replace(/\{\{\s*(selection|title|source|date)\s*\}\}/gi, (match, name) => {
+        const value = map[String(name).toLowerCase()];
+        return typeof value === 'string' ? value : '';
+      });
+    }
+
+    function templateDirective(template, t, templates) {
+      if (typeof template === 'string' && CUSTOM_TEMPLATE_ID.test(template)) {
+        const row = customTemplateById(template, templates);
+        return row === null ? '' : row.prompt;
+      }
       switch (template) {
         case 'implement':
           return t('template.implement.directive');
@@ -1004,6 +1100,49 @@ window.__ModuleLoader__.load({
         default:
           return '';
       }
+    }
+
+    function serializeTemplateBundle(templates) {
+      return JSON.stringify({ version: 1, templates: normalizeCustomTemplates(templates) }, null, 2);
+    }
+
+    function parseTemplateBundle(text) {
+      if (typeof text !== 'string' || text.trim() === '') return null;
+      try {
+        const parsed = JSON.parse(text);
+        const list = Array.isArray(parsed)
+          ? parsed
+          : parsed !== null &&
+              typeof parsed === 'object' &&
+              Array.isArray(parsed.templates)
+            ? parsed.templates
+            : null;
+        if (list === null) return null;
+        const stamp = Date.now().toString(36);
+        const rows = [];
+        list.forEach((entry, index) => {
+          const normalized = normalizeCustomTemplate(entry);
+          if (normalized !== null) {
+            rows.push(normalized);
+            return;
+          }
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return;
+          const name = typeof entry.name === 'string' ? entry.name.trim().slice(0, CUSTOM_TEMPLATE_NAME_MAX) : '';
+          const prompt = typeof entry.prompt === 'string' ? entry.prompt.slice(0, CUSTOM_TEMPLATE_PROMPT_MAX) : '';
+          if (name === '' && prompt.trim() === '') return;
+          rows.push({ id: 'custom:import-' + index + '-' + stamp, name, prompt });
+        });
+        return normalizeCustomTemplates(rows);
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function mergeCustomTemplates(existing, imported) {
+      const rows = normalizeCustomTemplates(existing);
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      for (const row of normalizeCustomTemplates(imported)) byId.set(row.id, row);
+      return normalizeCustomTemplates([...byId.values()]);
     }
 
     let uiSnapshot = { unread: 0, title: '' };
@@ -1222,6 +1361,8 @@ window.__ModuleLoader__.load({
       'preview.format.summary': '结构化摘要',
       'preview.format.conclusion': '仅结论',
       'preview.template': '任务指令',
+      'preview.template.customGroup': '自定义模板',
+      'preview.template.untitled': '未命名模板',
       'preview.insertPosition': '插入位置',
       'preview.insertEnd': '末尾',
       'preview.insertCursor': '当前光标',
@@ -1363,6 +1504,24 @@ window.__ModuleLoader__.load({
       'settings.selectorStatusNoHit': '远程选择器未命中当前页面，已回退本地内置选择器',
       'settings.selectorRefresh': '立即刷新选择器',
       'settings.selectorRefreshed': '已更新远程选择器',
+      'settings.templates': '自定义任务模板',
+      'settings.templatesHint': '模板作为「任务指令」追加到接力内容末尾，修改即时保存；内容为空的模板不会出现在选择器里。',
+      'settings.templatesEmpty': '还没有自定义模板。新增后可在接力预览的「任务指令」里选择。',
+      'settings.templateName': '模板名称',
+      'settings.templatePrompt': '模板内容，例如：按以下报错修复并补测试',
+      'settings.templateNewName': '新模板',
+      'settings.templateAdd': '新增模板',
+      'settings.templatesLimit': '最多只能保存 20 个自定义模板。',
+      'settings.templateDelete': '删除',
+      'settings.templateUp': '上移',
+      'settings.templateDown': '下移',
+      'settings.templateExport': '导出 JSON',
+      'settings.templateImport': '导入 JSON',
+      'settings.templatesExported': '模板 JSON 已导出',
+      'settings.templatesImported': '已导入 {count} 个模板',
+      'settings.templatesImportFailed': '导入失败：请选择正确的模板 JSON',
+      'settings.templateVars': '可用变量：',
+      'settings.templateVarsHint': '未选中时替换为空。',
       'settings.stats': '本地统计',
       'settings.statsBody': '打开 {open} 次 · 接力 {preview} 次 · 成功 {ok} 次 · 失败 {failed} 次 · 撤销 {undo} 次 · 复核回填 {review} 次',
       'settings.copyStats': '复制统计',
@@ -1634,6 +1793,8 @@ window.__ModuleLoader__.load({
       'preview.format.summary': 'Structured summary',
       'preview.format.conclusion': 'Conclusion only',
       'preview.template': 'Task instruction',
+      'preview.template.customGroup': 'Custom templates',
+      'preview.template.untitled': 'Untitled template',
       'preview.insertPosition': 'Insert at',
       'preview.insertEnd': 'End',
       'preview.insertCursor': 'Cursor',
@@ -1775,6 +1936,24 @@ window.__ModuleLoader__.load({
       'settings.selectorStatusNoHit': 'Remote selectors did not match the page; fell back to the built-in selectors',
       'settings.selectorRefresh': 'Refresh selectors now',
       'settings.selectorRefreshed': 'Remote selectors updated',
+      'settings.templates': 'Custom task templates',
+      'settings.templatesHint': 'Templates are appended as the task instruction and save as you type. Templates with empty text stay out of the selector.',
+      'settings.templatesEmpty': 'No custom templates yet. Add one and pick it under "Task instruction" in the handoff preview.',
+      'settings.templateName': 'Template name',
+      'settings.templatePrompt': 'Template text, for example: fix the error below and add tests',
+      'settings.templateNewName': 'New template',
+      'settings.templateAdd': 'Add template',
+      'settings.templatesLimit': 'You can keep at most 20 custom templates.',
+      'settings.templateDelete': 'Delete',
+      'settings.templateUp': 'Move up',
+      'settings.templateDown': 'Move down',
+      'settings.templateExport': 'Export JSON',
+      'settings.templateImport': 'Import JSON',
+      'settings.templatesExported': 'Template JSON exported',
+      'settings.templatesImported': 'Imported {count} templates',
+      'settings.templatesImportFailed': 'Import failed: choose a valid template JSON file',
+      'settings.templateVars': 'Variables: ',
+      'settings.templateVarsHint': 'Missing values are replaced with an empty string.',
       'settings.stats': 'Local stats',
       'settings.statsBody': '{open} opens · {preview} handoffs · {ok} succeeded · {failed} failed · {undo} undo · {review} review backfills',
       'settings.copyStats': 'Copy stats',
@@ -3009,6 +3188,41 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   align-items: stretch;
 }
 .dsh-dsc-modal-settings .dsh-dsc-heading { text-align: left; }
+.dsh-dsc-template-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dsh-dsc-template-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+}
+.dsh-dsc-template-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dsh-dsc-template-name { flex: 1 1 auto; min-width: 0; width: auto; }
+.dsh-dsc-template-move { width: 30px; padding: 0; box-sizing: border-box; }
+.dsh-dsc-template-prompt { min-height: 64px; resize: vertical; }
+.dsh-dsc-template-import { display: inline-flex; align-items: center; }
+.dsh-dsc-template-vars {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.dsh-dsc-template-vars code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+}
 .dsh-dsc-form-row {
   display: flex;
   align-items: flex-start;
@@ -4715,8 +4929,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const config = options !== null && typeof options === 'object' ? options : {};
       const safety = config.safety === true;
       const format = HANDOFF_FORMATS.includes(config.format) ? config.format : 'raw';
-      const template = HANDOFF_TEMPLATES.includes(config.template) ? config.template : 'none';
-      const directive = templateDirective(template, t);
+      const customTemplates = normalizeCustomTemplates(config.customTemplates);
+      const template = isKnownHandoffTemplate(config.template, customTemplates) ? config.template : 'none';
+      const directive = applyTemplateVariables(templateDirective(template, t, customTemplates), config.variables);
       const instruction = typeof config.instruction === 'string' ? config.instruction.trim() : '';
       const scope =
         typeof config.scope === 'string' && config.scope.trim() !== ''
@@ -4843,9 +5058,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       }
     }
 
-    function downloadText(name, text) {
+    function downloadText(name, text, mime) {
       try {
-        const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+        const blob = new Blob([text], {
+          type: typeof mime === 'string' && mime !== '' ? mime : 'text/markdown;charset=utf-8',
+        });
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
         anchor.href = url;
@@ -5883,6 +6100,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [updateChecking, setUpdateChecking] = React.useState(false);
       // Added in V2.1 after the existing slots for the same reason as above.
       const [reviewLog, setReviewLog] = React.useState(() => loadReviewLog());
+      // Added in V2.3: authored task templates live beside the panel state but
+      // in their own storage key, so a settings reset never deletes them.
+      const [customTemplates, setCustomTemplates] = React.useState(() => loadCustomTemplates());
       const dockDragRef = React.useRef(null);
       const hostRef = React.useRef(null);
       const panelRootRef = React.useRef(null);
@@ -5892,6 +6112,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const tRef = React.useRef(t);
       const phaseRef = React.useRef(phase);
       const settingsRef = React.useRef(settings);
+      const customTemplatesRef = React.useRef(customTemplates);
+      customTemplatesRef.current = customTemplates;
       const crashRecoveredRef = React.useRef(false);
       const autoHandoffRef = React.useRef(false);
       const runHandoffRef = React.useRef(null);
@@ -6113,6 +6335,74 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         saveSettings(next);
         track('dsc_settings', {});
       }, []);
+
+      const updateTemplates = (rows) => {
+        const next = saveCustomTemplates(rows);
+        customTemplatesRef.current = next;
+        setCustomTemplates(next);
+        track('dsc_templates', {});
+      };
+      const patchTemplate = (id, patch) => {
+        updateTemplates(
+          customTemplatesRef.current.map((row) => (row.id === id ? { ...row, ...patch } : row)),
+        );
+      };
+      const addTemplate = () => {
+        const rows = customTemplatesRef.current;
+        if (rows.length >= CUSTOM_TEMPLATE_LIMIT) {
+          showToast(t('settings.templatesLimit'));
+          return;
+        }
+        updateTemplates(
+          rows.concat({
+            id: newCustomTemplateId(rows),
+            name: t('settings.templateNewName'),
+            prompt: '',
+          }),
+        );
+      };
+      const deleteTemplate = (id) => {
+        updateTemplates(customTemplatesRef.current.filter((row) => row.id !== id));
+      };
+      const moveTemplate = (index, delta) => {
+        const rows = customTemplatesRef.current;
+        const target = index + delta;
+        if (target < 0 || target >= rows.length) return;
+        const next = rows.slice();
+        const moved = next[index];
+        next[index] = next[target];
+        next[target] = moved;
+        updateTemplates(next);
+      };
+      const exportTemplates = () => {
+        const json = serializeTemplateBundle(customTemplatesRef.current);
+        const saved = downloadText('deepseek-templates.json', json, 'application/json;charset=utf-8');
+        showToast(saved ? t('settings.templatesExported') : t('handoff.error.failed'));
+      };
+      const importTemplates = (event) => {
+        const input = event !== null && event !== undefined ? event.target : null;
+        const file = input !== null && input !== undefined && input.files ? input.files[0] : null;
+        if (input !== null && input !== undefined) input.value = '';
+        if (file === null || file === undefined) return;
+        if (typeof file.text !== 'function') {
+          showToast(t('settings.templatesImportFailed'));
+          return;
+        }
+        file
+          .text()
+          .then((text) => {
+            const rows = parseTemplateBundle(text);
+            if (rows === null) {
+              showToast(t('settings.templatesImportFailed'));
+              return;
+            }
+            updateTemplates(mergeCustomTemplates(customTemplatesRef.current, rows));
+            showToast(t('settings.templatesImported', { count: rows.length }));
+          })
+          .catch(() => {
+            showToast(t('settings.templatesImportFailed'));
+          });
+      };
 
       const requestNotifyPermission = React.useCallback(() => {
         try {
@@ -6818,7 +7108,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           setPreview(null);
           const tokens = estimateTokens(payload.text);
           const format = HANDOFF_FORMATS.includes(payload.format) ? payload.format : 'raw';
-          const template = HANDOFF_TEMPLATES.includes(payload.template) ? payload.template : 'none';
+          const template =
+            HANDOFF_TEMPLATES.includes(payload.template) || CUSTOM_TEMPLATE_ID.test(payload.template)
+              ? payload.template
+              : 'none';
           const hash =
             typeof payload.hash === 'string'
               ? payload.hash
@@ -7265,6 +7558,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           setHistory(loadHistory());
           setDraftOffer(loadDraft());
           setReviewLog(loadReviewLog());
+          setCustomTemplates(loadCustomTemplates());
           reviewStore.set(null);
           setHistoryOpen(false);
           setSettingsOpen(false);
@@ -7946,8 +8240,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const previewSelected = preview === null ? [] : preview.messages.filter((message) => message.selected);
       const previewFormat = preview === null || !HANDOFF_FORMATS.includes(preview.format) ? 'raw' : preview.format;
       const previewTemplate =
-        preview === null || !HANDOFF_TEMPLATES.includes(preview.template) ? 'none' : preview.template;
+        preview === null || !isKnownHandoffTemplate(preview.template, customTemplates)
+          ? 'none'
+          : preview.template;
       const previewInsertPosition = preview === null ? 'end' : preview.insertPosition === 'cursor' ? 'cursor' : 'end';
+      const previewTarget =
+        preview === null ? undefined : preview.targets.find((target) => target.id === preview.targetSessionId);
+      const previewVariables = {
+        selection: lastSelectionRef.current,
+        title: previewTarget === undefined || previewTarget === null ? '' : previewTarget.title,
+        source:
+          preview === null || typeof preview.sourceTitle !== 'string' ? '' : preview.sourceTitle,
+        date: formatStamp(new Date()).slice(0, 10),
+      };
       const previewGeneratedText =
         preview === null || previewSelected.length === 0
           ? ''
@@ -7955,6 +8260,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               safety: preview.safety,
               format: previewFormat,
               template: previewTemplate,
+              customTemplates,
+              variables: previewVariables,
               ...(preview.review
                 ? {
                     scope: t('review.scope'),
@@ -8031,9 +8338,6 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       );
       const dedupeMatch =
         preview !== null && settings.dedupe ? history.find((row) => row.hash === previewHash) : undefined;
-      const previewTarget =
-        preview === null ? undefined : preview.targets.find((target) => target.id === preview.targetSessionId);
-
       const commitPreview = React.useCallback(() => {
         if (preview === null) return;
         if (previewSelected.length === 0) {
@@ -8382,7 +8686,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             targets,
             targetSessionId,
             format: HANDOFF_FORMATS.includes(row.format) ? row.format : 'raw',
-            template: HANDOFF_TEMPLATES.includes(row.template) ? row.template : 'none',
+            template: isKnownHandoffTemplate(row.template, customTemplatesRef.current) ? row.template : 'none',
             safety: settingsRef.current.safety,
             showText: false,
             returnToHarness: settingsRef.current.returnToHarness,
@@ -8743,6 +9047,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                         HANDOFF_TEMPLATES.map((template) =>
                           h('option', { key: template, value: template }, t('preview.template.' + template)),
                         ),
+                        customTemplates.some((template) => template.prompt.trim() !== '')
+                          ? h(
+                              'optgroup',
+                              { label: t('preview.template.customGroup') },
+                              customTemplates
+                                .filter((template) => template.prompt.trim() !== '')
+                                .map((template) =>
+                                  h(
+                                    'option',
+                                    { key: template.id, value: template.id },
+                                    template.name.trim() === ''
+                                      ? t('preview.template.untitled')
+                                      : template.name,
+                                  ),
+                                ),
+                            )
+                          : null,
                       ),
                     ),
                     h(
@@ -9264,6 +9585,119 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     [60, '60 min'],
                   ].map(([value, label]) => h('option', { key: value, value: String(value) }, label)),
                 ),
+              ),
+              h('h3', { className: 'dsh-dsc-subheading' }, t('settings.templates')),
+              h('p', { className: 'dsh-dsc-text' }, t('settings.templatesHint')),
+              customTemplates.length === 0
+                ? h('p', { className: 'dsh-dsc-text' }, t('settings.templatesEmpty'))
+                : h(
+                    'div',
+                    { className: 'dsh-dsc-template-list' },
+                    customTemplates.map((template, index) =>
+                      h(
+                        'div',
+                        { key: template.id, className: 'dsh-dsc-template-row' },
+                        h(
+                          'div',
+                          { className: 'dsh-dsc-template-head' },
+                          h('input', {
+                            className: 'dsh-dsc-input dsh-dsc-template-name',
+                            type: 'text',
+                            value: template.name,
+                            maxLength: CUSTOM_TEMPLATE_NAME_MAX,
+                            placeholder: t('settings.templateName'),
+                            'aria-label': t('settings.templateName'),
+                            onChange: (event) => patchTemplate(template.id, { name: event.target.value }),
+                          }),
+                          h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'dsh-dsc-button dsh-dsc-template-move',
+                              disabled: index === 0,
+                              title: t('settings.templateUp'),
+                              'aria-label': t('settings.templateUp'),
+                              onClick: () => moveTemplate(index, -1),
+                            },
+                            '\u2191',
+                          ),
+                          h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'dsh-dsc-button dsh-dsc-template-move',
+                              disabled: index === customTemplates.length - 1,
+                              title: t('settings.templateDown'),
+                              'aria-label': t('settings.templateDown'),
+                              onClick: () => moveTemplate(index, 1),
+                            },
+                            '\u2193',
+                          ),
+                          h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'dsh-dsc-button',
+                              onClick: () => deleteTemplate(template.id),
+                            },
+                            t('settings.templateDelete'),
+                          ),
+                        ),
+                        h('textarea', {
+                          className: 'dsh-dsc-textarea dsh-dsc-template-prompt',
+                          value: template.prompt,
+                          maxLength: CUSTOM_TEMPLATE_PROMPT_MAX,
+                          placeholder: t('settings.templatePrompt'),
+                          'aria-label': t('settings.templatePrompt'),
+                          onChange: (event) => patchTemplate(template.id, { prompt: event.target.value }),
+                        }),
+                      ),
+                    ),
+                  ),
+              h(
+                'div',
+                { className: 'dsh-dsc-footer-actions' },
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-dsc-button', onClick: addTemplate },
+                  t('settings.templateAdd'),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-button',
+                    disabled: customTemplates.length === 0,
+                    onClick: exportTemplates,
+                  },
+                  t('settings.templateExport'),
+                ),
+                h(
+                  'label',
+                  { className: 'dsh-dsc-button dsh-dsc-template-import' },
+                  t('settings.templateImport'),
+                  h('input', {
+                    type: 'file',
+                    accept: '.json,application/json',
+                    style: { display: 'none' },
+                    onChange: importTemplates,
+                  }),
+                ),
+              ),
+              h(
+                'p',
+                { className: 'dsh-dsc-text dsh-dsc-template-vars' },
+                t('settings.templateVars'),
+                ['selection', 'title', 'source', 'date'].map((name, index) =>
+                  h(
+                    'span',
+                    { key: name },
+                    index === 0 ? null : ' · ',
+                    h('code', null, '{{' + name + '}}'),
+                  ),
+                ),
+                ' ',
+                t('settings.templateVarsHint'),
               ),
               h('h3', { className: 'dsh-dsc-subheading' }, t('settings.stats')),
               h('p', { className: 'dsh-dsc-text' }, t('settings.reportHint')),
@@ -10251,6 +10685,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           REVIEW_KEY,
           REVIEW_LOG_KEY,
           CHECKPOINT_KEY,
+          TEMPLATES_KEY,
         ]) {
           try {
             window.localStorage.removeItem(key);
@@ -10720,6 +11155,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         limitStructuredSummary,
         conclusionOf,
         templateDirective,
+        normalizeCustomTemplate,
+        normalizeCustomTemplates,
+        loadCustomTemplates,
+        saveCustomTemplates,
+        newCustomTemplateId,
+        customTemplateById,
+        isKnownHandoffTemplate,
+        applyTemplateVariables,
+        serializeTemplateBundle,
+        parseTemplateBundle,
+        mergeCustomTemplates,
         handoffHash,
         lintHandoff,
         maskHandoffText,
