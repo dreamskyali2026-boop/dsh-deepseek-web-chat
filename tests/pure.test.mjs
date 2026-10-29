@@ -95,6 +95,12 @@ const {
   dockPaneById,
   formatClock,
   historyStore,
+  composeStore,
+  buildReviewPrompt,
+  reviewErrorText,
+  reviewRouteUrl,
+  fetchReviewMessage,
+  ReviewAction,
   ComposerDock,
   SettingsSection,
   ChatPanel,
@@ -944,7 +950,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.8.0');
+  assert.equal(parsed.version, '1.9.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -2006,8 +2012,10 @@ test('apply registers the panel, composer dock and settings section', () => {
       return undefined;
     },
   };
+  let applied = null;
   try {
-    moduleDefinition.factory(() => ({})).apply(ctx);
+    applied = moduleDefinition.factory(() => ({}));
+    applied.apply(ctx);
   } finally {
     globalThis.document = previousDocument;
   }
@@ -2018,6 +2026,7 @@ test('apply registers the panel, composer dock and settings section', () => {
     'sidebar.panellist',
     'shell.overlay',
     'conversation.composer.dock',
+    'conversation.chat.assistant-actions',
     'settings.section',
   ]) {
     assert.ok(names.includes(name), 'registered ' + name);
@@ -2028,7 +2037,176 @@ test('apply registers the panel, composer dock and settings section', () => {
   const dockProps = dock.inject();
   assert.equal(typeof dockProps.openPanel, 'function');
   assert.equal(typeof dockProps.history.getSnapshot, 'function');
+  const review = registrations.find((row) => row.name === 'conversation.chat.assistant-actions');
+  assert.equal(review.id, 'deepseek-review');
+  assert.equal(typeof review.inject, 'function');
+  const reviewProps = review.inject();
+  assert.equal(typeof reviewProps.review, 'function');
+  assert.equal(reviewProps.review('   '), false);
+  assert.equal(reviewProps.review('请复核这段回答'), true);
+  assert.equal(applied.__test.composeStore.getSnapshot().text, '请复核这段回答');
+  applied.__test.composeStore.take();
   const settings = registrations.find((row) => row.name === 'settings.section');
   assert.equal(typeof settings.label(), 'string');
   assert.equal(settings.label(), 'settings.nav');
+});
+
+test('composeStore publishes one pending fill and clears it on take', () => {
+  composeStore.take();
+  let notifications = 0;
+  const unsubscribe = composeStore.subscribe(() => {
+    notifications += 1;
+  });
+  assert.equal(composeStore.getSnapshot(), null);
+  assert.equal(composeStore.request('   ', 'review'), false);
+  assert.equal(composeStore.request('请复核这段回答', 'review'), true);
+  const pending = composeStore.getSnapshot();
+  assert.equal(pending.text, '请复核这段回答');
+  assert.equal(pending.source, 'review');
+  assert.equal(typeof pending.at, 'number');
+  const taken = composeStore.take();
+  assert.equal(taken.text, '请复核这段回答');
+  assert.equal(composeStore.getSnapshot(), null);
+  assert.equal(composeStore.take(), null);
+  unsubscribe();
+  assert.equal(notifications, 2);
+});
+
+test('buildReviewPrompt frames the reply, source and truncation', () => {
+  const prompt = buildReviewPrompt({ text: '  结论 A  ', title: '需求讨论', truncated: true, chars: 20000 }, t);
+  assert.match(prompt, /^review\.intro/);
+  assert.match(prompt, /review\.points/);
+  assert.match(prompt, /review\.source\(title=需求讨论\)/);
+  assert.match(prompt, /review\.truncated\(chars=20000\)/);
+  assert.match(prompt, /review\.begin/);
+  assert.match(prompt, /结论 A/);
+  assert.match(prompt, /review\.end$/);
+  assert.ok(prompt.indexOf('结论 A') > prompt.indexOf('review.begin'));
+
+  const untitled = buildReviewPrompt({ text: 'ok', title: '' }, t);
+  assert.match(untitled, /review\.source\(title=review\.untitled\)/);
+  assert.doesNotMatch(untitled, /review\.truncated/);
+  assert.equal(buildReviewPrompt({ text: '   ' }, t), '');
+  assert.equal(buildReviewPrompt(null, t), '');
+});
+
+test('reviewErrorText maps stable host codes onto locale keys', () => {
+  assert.equal(reviewErrorText('host/message-not-found', t), 'review.error.notFound');
+  assert.equal(reviewErrorText('host/session-not-found', t), 'review.error.notFound');
+  assert.equal(reviewErrorText('host/message-empty', t), 'review.error.empty');
+  assert.equal(reviewErrorText('host/unsupported', t), 'review.error.host');
+  assert.equal(reviewErrorText('host/query-failed', t), 'review.error.host');
+  assert.equal(reviewErrorText('host/route-missing', t), 'review.error.route');
+  assert.equal(reviewErrorText('host/unauthorized', t), 'review.error.auth');
+  assert.equal(reviewErrorText('host/invalid', t), 'review.error.route');
+  assert.equal(reviewErrorText('something-else', t), 'review.error.generic');
+});
+
+test('reviewRouteUrl resolves against the document base and falls back to the root', () => {
+  const previous = globalThis.document;
+  try {
+    globalThis.document = { baseURI: 'http://127.0.0.1:57770/' };
+    assert.equal(reviewRouteUrl(), 'http://127.0.0.1:57770/api/deepseek-web-chat.message');
+    globalThis.document = { baseURI: 'http://127.0.0.1:57770/mount/' };
+    assert.equal(reviewRouteUrl(), 'http://127.0.0.1:57770/mount/api/deepseek-web-chat.message');
+    globalThis.document = undefined;
+    assert.equal(reviewRouteUrl(), '/api/deepseek-web-chat.message');
+  } finally {
+    globalThis.document = previous;
+  }
+});
+
+test('fetchReviewMessage maps host answers and failures onto stable codes', async () => {
+  const response = (status, body) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  });
+  const success = await fetchReviewMessage('session-1', 'message-1', {
+    fetch: async () => response(200, { ok: true, text: '正文', title: '会话', truncated: false, chars: 2 }),
+  });
+  assert.equal(success.ok, true);
+  assert.equal(success.text, '正文');
+  assert.equal(success.title, '会话');
+
+  const missing = await fetchReviewMessage('session-1', 'message-1', {
+    fetch: async () => response(404, { ok: false, error: 'message-not-found' }),
+  });
+  assert.deepEqual(missing, { ok: false, error: 'host/message-not-found' });
+
+  const unsupported = await fetchReviewMessage('session-1', 'message-1', {
+    fetch: async () => response(503, { ok: false, error: 'unsupported' }),
+  });
+  assert.equal(unsupported.error, 'host/unsupported');
+
+  const unauthorized = await fetchReviewMessage('session-1', 'message-1', {
+    fetch: async () => response(401, { error: 'unauthorized' }),
+  });
+  assert.equal(unauthorized.error, 'host/unauthorized');
+
+  const empty = await fetchReviewMessage('session-1', 'message-1', {
+    fetch: async () => response(200, { ok: true, text: '   ' }),
+  });
+  assert.equal(empty.error, 'host/message-empty');
+
+  const offline = await fetchReviewMessage('session-1', 'message-1', {
+    fetch: async () => {
+      throw new Error('connection refused');
+    },
+  });
+  assert.equal(offline.error, 'host/route-missing');
+
+  const invalid = await fetchReviewMessage('bad id', 'message-1', { fetch: async () => response(200, {}) });
+  assert.equal(invalid.error, 'host/invalid');
+});
+
+test('review action renders one button and fills the review request', async () => {
+  const calls = [];
+  Object.assign(reactStub, {
+    Fragment: 'Fragment',
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      return [typeof initial === 'function' ? initial() : initial, () => {}];
+    },
+    useEffect() {},
+    useRef(value) {
+      return { current: value };
+    },
+    useCallback(fn) {
+      return fn;
+    },
+  });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ ok: true, text: '回复正文', title: '需求讨论', truncated: false }),
+  });
+  try {
+    const tree = ReviewAction(
+      {
+        messageId: 'message-1',
+        sessionId: 'session-1',
+        review: (text) => {
+          calls.push(text);
+          return true;
+        },
+        t,
+      },
+    );
+    assert.equal(tree.type, 'Fragment');
+    const button = tree.props.children[0];
+    assert.equal(button.type, 'button');
+    assert.equal(button.props['aria-label'], 'review.action');
+    assert.equal(button.props.disabled, false);
+    await button.props.onClick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /回复正文/);
+    assert.match(calls[0], /需求讨论/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });

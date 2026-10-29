@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V1.8.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V1.9.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -76,6 +76,15 @@
 - **系统设置页**：设置 → DeepSeek 网页聊天，提供「打开面板」「快速提问」「接力历史」三个入口，以及本地统计和「清空本地数据」（会清除历史、统计、草稿快照、小窗位置和偏好，不影响 DeepSeek 登录态）。
 - 这两处都依赖当前客户端已提供的 `conversation.composer.dock` 与 `settings.section` 槽位；旧客户端上会自动跳过注册，不影响面板本身。
 
+### 复核回复（V1.9）
+
+- Harness 里每条已完成的助手回复下面会多一个「发给 DeepSeek 复核」图标按钮（与复制、点赞同一行）。点一下，插件会读取**这一条**回复的正文，按固定结构组装成复核请求，然后打开 DeepSeek 面板并填入输入框——**不会自动发送**，可以在输入框里先改。
+- 复核请求包含来源会话标题和四条检查项（事实/引用错误、遗漏前提与风险、表述问题、更稳妥的替代做法），并要求 DeepSeek 在没有问题时明确说「未发现问题」。
+- 正文由 **Host 半**读取：插件新增认证路由 `POST /api/deepseek-web-chat.message`，用 `sessionQuery` 从会话日志里按消息 id 取回该条 `assistant/message` 的**可见文本块**。推理内容、工具调用参数、文件路径、工作区路径都不会返回。
+- 单条回复超过 12,000 字符时会截断并注明原文长度；找不到消息、会话已删除或 Host 服务未加载时，按钮旁会显示明确原因，不会静默失败。
+- 填入失败会兜底复制到剪贴板并提示：未登录 DeepSeek、输入框里已有内容、面板不可用或网页未加载完成。
+- **升级注意**：Host 半是新增能力，`index.js` 的改动需要**重启 Harness** 后才生效；只刷新网页时按钮会提示「Host 服务不可用，请重启 Harness 后重试」。
+
 ### 历史与去重
 
 - 每次成功接力会记录格式、模板、目标会话、字符数、token、来源和时间；在接力菜单的「接力历史…」里可以再次接力、复制、删除或清空。
@@ -130,12 +139,13 @@
 
 - `package.json`：bundle 与客户端模块清单
 - `cordis.patch.yml`：向 profile 插入插件行
-- `index.js`：Host 侧空实现（功能全部在客户端）
-- `client.js`：侧栏图标、主内容区聊天面板、并排停靠、嵌入式浏览器租约、接力预览与编辑、接力前体检与打码、抓取保真、结构化摘要、历史去重与双向回跳、反向接力、输入框状态条、原生设置页、通知、诊断
-- `tests/pure.test.mjs`：纯函数单测（接力范围、格式化、摘要、模板、hash、设置、历史、体检与打码、来源清洗、诊断、guest 探针、token 估算）
+- `index.js`：Host 半：认证路由 `POST /api/deepseek-web-chat.message`，用 `sessionQuery` 读取指定 assistant 消息的可见文本块（复核功能的数据来源）
+- `client.js`：侧栏图标、主内容区聊天面板、并排停靠、嵌入式浏览器租约、接力预览与编辑、接力前体检与打码、抓取保真、结构化摘要、历史去重与双向回跳、反向接力、输入框状态条、原生设置页、「发给 DeepSeek 复核」、通知、诊断
+- `tests/pure.test.mjs`：纯函数单测（接力范围、格式化、摘要、模板、hash、设置、历史、体检与打码、来源清洗、诊断、guest 探针、token 估算、复核提示词与队列）
+- `tests/host.test.mjs`：Host 半单测（路由注册、消息提取、截断、错误码、观察租约释放）
 - `locale/*.json`：插件管理器中显示的名称与说明
 - `icon.svg`：插件图标，使用 DeepSeek 官方网页 favicon 中的鲸鱼标记（<https://fe-static.deepseek.com/chat/favicon.svg>），仅用于标识 DeepSeek 网页聊天入口
-- `待开发需求.md`：V1.8 / V2 待开发需求与优先级
+- `待开发需求.md`：V1.9 / V2 待开发需求与优先级
 - `.github/workflows/test.yml`：GitHub Actions 单测 CI
 - `native-sidebar.png`：原生右侧栏并排效果图（README 顶部）
 - `screenshot.png`：V1.2 全屏面板效果图（留档）
