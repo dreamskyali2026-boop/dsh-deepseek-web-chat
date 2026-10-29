@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '2.3.0';
+    const PLUGIN_VERSION = '2.4.0';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -61,6 +61,23 @@ window.__ModuleLoader__.load({
     const CUSTOM_TEMPLATE_NAME_MAX = 40;
     const CUSTOM_TEMPLATE_PROMPT_MAX = 4000;
     const CUSTOM_TEMPLATE_ID = /^custom:[a-z0-9-]{1,40}$/;
+    const PET_KEY = 'dsh-deepseek-web-chat.pet.v1';
+    const PET_POS_KEY = 'dsh-deepseek-web-chat.pet-pos.v1';
+    const PET_NAME_MAX = 12;
+    const PET_DAILY_XP_CAP = 40;
+    const PET_LEVEL_XP = Object.freeze([0, 6, 16, 32, 56, 88, 128, 180, 240, 320]);
+    const PET_XP = Object.freeze({ day: 2, open: 1, done: 1, handoff: 3, review: 4, boss: 1 });
+    const PET_ACHIEVEMENTS = Object.freeze([
+      'first-open',
+      'first-handoff',
+      'ten-handoffs',
+      'first-review',
+      'streak-3',
+      'streak-7',
+      'night-owl',
+      'boss-first',
+      'level-5',
+    ]);
     const QUICK_MIN_WIDTH = 320;
     const QUICK_MIN_HEIGHT = 320;
     const NEW_CHAT_FILL_ATTEMPTS = 12;
@@ -83,6 +100,9 @@ window.__ModuleLoader__.load({
       dockRatio: 0.42,
       remoteSelectors: true,
       selectorUrl: SELECTORS_URL,
+      pet: true,
+      petName: '',
+      bossKey: true,
     });
     let panelControl = null;
     let undoValue = null;
@@ -441,6 +461,9 @@ window.__ModuleLoader__.load({
           if (!Number.isFinite(ratio)) return DEFAULT_SETTINGS.dockRatio;
           return Math.min(0.7, Math.max(0.2, Math.round(ratio * 1000) / 1000));
         })(),
+        pet: typeof raw.pet === 'boolean' ? raw.pet : DEFAULT_SETTINGS.pet,
+        petName: (typeof raw.petName === 'string' ? raw.petName.trim() : '').slice(0, PET_NAME_MAX),
+        bossKey: typeof raw.bossKey === 'boolean' ? raw.bossKey : DEFAULT_SETTINGS.bossKey,
       };
     }
 
@@ -450,6 +473,313 @@ window.__ModuleLoader__.load({
 
     function saveSettings(settings) {
       return writeJson(SETTINGS_KEY, normalizeSettings(settings));
+    }
+
+    // --- Whale pet and presentation cover (V2.4) ---------------------------
+    // Both features are local-only. The pet keeps counters, streaks and
+    // unlocked cosmetics; the cover screen renders a deterministic fake build
+    // log. Nothing here reads conversation content or reaches the network.
+
+    function petDayKey(value) {
+      const date = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return date.getFullYear() + '-' + month + '-' + day;
+    }
+
+    function petDayNumberOf(value) {
+      const date = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(date.getTime())) return 0;
+      return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
+    }
+
+    function petLevelOf(value) {
+      const xp = Math.max(0, Math.round(Number(value) || 0));
+      let level = 1;
+      for (let index = 0; index < PET_LEVEL_XP.length; index += 1) {
+        if (xp >= PET_LEVEL_XP[index]) level = index + 1;
+      }
+      const base = PET_LEVEL_XP[level - 1];
+      const next = level < PET_LEVEL_XP.length ? PET_LEVEL_XP[level] : null;
+      const span = next === null ? 0 : next - base;
+      return {
+        level,
+        xp,
+        base,
+        next,
+        into: Math.max(0, xp - base),
+        span,
+        progress: next === null ? 1 : Math.min(1, Math.max(0, (xp - base) / span)),
+      };
+    }
+
+    function petTitleKey(level) {
+      const safe = Math.min(PET_LEVEL_XP.length, Math.max(1, Math.round(Number(level) || 1)));
+      return 'pet.level.' + String(safe);
+    }
+
+    function normalizePetState(value) {
+      const raw = value !== null && typeof value === 'object' ? value : {};
+      const achievements = [];
+      for (const id of Array.isArray(raw.achievements) ? raw.achievements : []) {
+        if (typeof id === 'string' && PET_ACHIEVEMENTS.includes(id) && !achievements.includes(id)) {
+          achievements.push(id);
+        }
+      }
+      return {
+        xp: Math.max(0, Math.min(100000, Math.round(Number(raw.xp) || 0))),
+        streak: Math.max(0, Math.min(10000, Math.round(Number(raw.streak) || 0))),
+        days: Math.max(0, Math.min(100000, Math.round(Number(raw.days) || 0))),
+        lastDay: typeof raw.lastDay === 'string' ? raw.lastDay.slice(0, 10) : '',
+        dayXp: Math.max(0, Math.min(PET_DAILY_XP_CAP, Math.round(Number(raw.dayXp) || 0))),
+        dayXpDay: typeof raw.dayXpDay === 'string' ? raw.dayXpDay.slice(0, 10) : '',
+        achievements,
+      };
+    }
+
+    function loadPetState() {
+      return normalizePetState(readJson(PET_KEY, null));
+    }
+
+    function savePetState(value) {
+      const next = normalizePetState(value);
+      writeJson(PET_KEY, next);
+      return next;
+    }
+
+    function touchPetDay(value, now) {
+      const state = normalizePetState(value);
+      const stamp = Number.isFinite(now) ? now : Date.now();
+      const today = petDayKey(stamp);
+      if (today === '' || state.lastDay === today) return { state, fresh: false, streak: state.streak };
+      const previous = new Date(stamp);
+      previous.setDate(previous.getDate() - 1);
+      const yesterday = petDayKey(previous);
+      const streak = state.lastDay === yesterday ? state.streak + 1 : 1;
+      return {
+        state: { ...state, lastDay: today, days: state.days + 1, streak },
+        fresh: true,
+        streak,
+      };
+    }
+
+    function awardPet(value, kind, now) {
+      const state = normalizePetState(value);
+      const base = PET_XP[kind] === undefined ? 0 : PET_XP[kind];
+      if (base <= 0) return state;
+      const stamp = Number.isFinite(now) ? now : Date.now();
+      const today = petDayKey(stamp);
+      const dayXp = state.dayXpDay === today ? state.dayXp : 0;
+      const room = Math.max(0, PET_DAILY_XP_CAP - dayXp);
+      const gained = Math.min(base, room);
+      return { ...state, xp: state.xp + gained, dayXp: dayXp + gained, dayXpDay: today };
+    }
+
+    function unlockPetAchievements(value, context) {
+      const state = normalizePetState(value);
+      const ids = new Set(state.achievements);
+      const unlocked = [];
+      const add = (id) => {
+        if (ids.has(id)) return;
+        ids.add(id);
+        unlocked.push(id);
+      };
+      const counts =
+        context !== null && typeof context === 'object' && context.counts !== null && typeof context.counts === 'object'
+          ? context.counts
+          : {};
+      if ((Number(counts.dsc_open) || 0) >= 1) add('first-open');
+      if ((Number(counts.dsc_handoff_ok) || 0) >= 1) add('first-handoff');
+      if ((Number(counts.dsc_handoff_ok) || 0) >= 10) add('ten-handoffs');
+      if ((Number(counts.dsc_review_captured) || 0) >= 1) add('first-review');
+      if (state.streak >= 3) add('streak-3');
+      if (state.streak >= 7) add('streak-7');
+      if (context !== null && typeof context === 'object' && context.kind === 'boss') add('boss-first');
+      const at =
+        context !== null && typeof context === 'object' && Number.isFinite(context.now) ? context.now : Date.now();
+      const hour = new Date(at).getHours();
+      if (hour >= 0 && hour < 5) add('night-owl');
+      if (petLevelOf(state.xp).level >= 5) add('level-5');
+      return { state: { ...state, achievements: [...ids] }, unlocked };
+    }
+
+    let petMood = { mode: 'idle', at: 0, detail: null };
+    const petListeners = new Set();
+
+    function emitPet(mode, detail) {
+      petMood = { mode, at: Date.now(), detail: detail === undefined ? null : detail };
+      for (const listener of [...petListeners]) {
+        try {
+          listener(petMood);
+        } catch (error) {
+          /* Pet listeners are best effort. */
+        }
+      }
+    }
+
+    function subscribePet(listener) {
+      petListeners.add(listener);
+      return () => petListeners.delete(listener);
+    }
+
+    function getPetMood() {
+      return petMood;
+    }
+
+    function notePetActivity(kind) {
+      try {
+        if (loadSettings().pet !== true) return null;
+        const now = Date.now();
+        let state = loadPetState();
+        const day = touchPetDay(state, now);
+        state = day.state;
+        if (day.fresh) state = awardPet(state, 'day', now);
+        state = awardPet(state, kind, now);
+        const metrics = loadMetrics();
+        const result = unlockPetAchievements(state, { counts: metrics.counts, kind, now });
+        state = savePetState(result.state);
+        for (const id of result.unlocked) emitPet('achievement', id);
+        return { state, fresh: day.fresh, unlocked: result.unlocked };
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function normalizePetPos(value) {
+      const raw = value !== null && typeof value === 'object' ? value : {};
+      const x = Number(raw.x);
+      const y = Number(raw.y);
+      return {
+        x: Math.min(0.96, Math.max(0.04, Number.isFinite(x) ? x : 0.9)),
+        y: Math.min(0.9, Math.max(0.12, Number.isFinite(y) ? y : 0.42)),
+      };
+    }
+
+    function loadPetPos() {
+      return normalizePetPos(readJson(PET_POS_KEY, null));
+    }
+
+    function savePetPos(value) {
+      return writeJson(PET_POS_KEY, normalizePetPos(value));
+    }
+
+    function buildBossLog(seed, count) {
+      const requested = Number(count);
+      const limit = Math.max(1, Math.min(200, Math.round(Number.isFinite(requested) ? requested : 48)));
+      let randomState = (Number(seed) >>> 0) || 1;
+      const random = () => {
+        randomState = (randomState + 0x6d2b79f5) >>> 0;
+        let value = randomState;
+        value = Math.imul(value ^ (value >>> 15), value | 1);
+        value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+        return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+      };
+      const pick = (list) => list[Math.floor(random() * list.length) % list.length];
+      const lines = [];
+      const push = (kind, text) => {
+        if (lines.length >= limit) return;
+        lines.push({ kind, text: String(text).replace(/\s+/g, ' ').slice(0, 180) });
+      };
+      const files = [
+        'src/core/queue.ts',
+        'src/core/session.ts',
+        'src/ui/panel.tsx',
+        'src/handoff/format.ts',
+        'src/pet/state.ts',
+        'src/boss/screen.tsx',
+        'tests/handoff.test.ts',
+        'tests/pet.test.ts',
+        'tests/theme.test.ts',
+        'src/theme/tokens.ts',
+      ];
+      const workspaces = ['/workspace', '/Users/dev/workspace', '/home/dev/workspace'];
+      const retries = ['retry 1 (flaky snapshot)', 'retry 1 (port in use)', 'retry 2 (timeout 5s)'];
+      push('cmd', '$ pnpm test');
+      push('info', 'RUN  v2.1.9  ' + pick(workspaces));
+      const suites = 9 + Math.floor(random() * 6);
+      for (let index = 0; index < suites; index += 1) {
+        const tests = 3 + Math.floor(random() * 22);
+        const ms = 8 + Math.floor(random() * 180);
+        push('ok', '✓ ' + pick(files) + ' (' + tests + ' tests) ' + ms + 'ms');
+        if (random() < 0.18) push('dim', '  ↳ ' + pick(retries));
+      }
+      push('ok', 'Test Files  ' + suites + ' passed (' + suites + ')');
+      const total = 120 + Math.floor(random() * 90);
+      push('ok', 'Tests  ' + total + ' passed (' + total + ')');
+      push('dim', 'Duration  ' + (1.8 + random() * 3).toFixed(2) + 's');
+      push('cmd', '$ pnpm build');
+      push('info', 'vite v' + (5 + Math.floor(random() * 2)) + '.0.1 building for production...');
+      push('info', '✓ ' + (90 + Math.floor(random() * 90)) + ' modules transformed.');
+      push(
+        'ok',
+        'dist/assets/index-' +
+          (1000 + Math.floor(random() * 8999)).toString(16) +
+          '.js  ' +
+          (120 + Math.floor(random() * 120)) +
+          '.' +
+          String(Math.floor(random() * 99)).padStart(2, '0') +
+          ' kB │ gzip: ' +
+          (40 + Math.floor(random() * 40)) +
+          ' kB',
+      );
+      push('ok', '✓ built in ' + (2 + random() * 4).toFixed(2) + 's');
+      push('cmd', '$ pnpm lint');
+      push('ok', '✔ 0 problems (0 errors, 0 warnings)');
+      push('dim', 'watching for file changes...');
+      const idle = ['[watch] no changes', '[watch] rebuild queued', '[watch] test run cached', '[watch] waiting for input'];
+      while (lines.length < limit) push('dim', pick(idle));
+      return lines;
+    }
+
+    let bossVisible = false;
+    let bossPreviousFocus = null;
+    const bossListeners = new Set();
+
+    function getBossVisible() {
+      return bossVisible;
+    }
+
+    function subscribeBoss(listener) {
+      bossListeners.add(listener);
+      return () => bossListeners.delete(listener);
+    }
+
+    function setBossVisible(value) {
+      const next = value === true;
+      if (next === bossVisible) return bossVisible;
+      bossVisible = next;
+      if (typeof document !== 'undefined') {
+        if (next) {
+          bossPreviousFocus =
+            document.activeElement !== null && typeof document.activeElement === 'object' ? document.activeElement : null;
+        } else {
+          const previous = bossPreviousFocus;
+          bossPreviousFocus = null;
+          if (previous !== null && typeof previous.focus === 'function') {
+            try {
+              previous.focus();
+            } catch (error) {
+              /* Restoring focus is best effort. */
+            }
+          }
+        }
+      }
+      for (const listener of [...bossListeners]) {
+        try {
+          listener();
+        } catch (error) {
+          /* Cover listeners are best effort. */
+        }
+      }
+      return bossVisible;
+    }
+
+    function toggleBossVisible() {
+      if (loadSettings().bossKey !== true) return bossVisible;
+      const next = setBossVisible(!bossVisible);
+      if (next) track('dsc_boss_key', {});
+      return next;
     }
 
     // --- Version and update check (D5) --------------------------------------
@@ -964,6 +1294,13 @@ window.__ModuleLoader__.load({
           }
         }
         writeJson(METRICS_KEY, metrics);
+        const petKind = {
+          dsc_open: 'open',
+          dsc_handoff_ok: 'handoff',
+          dsc_review_captured: 'review',
+          dsc_boss_key: 'boss',
+        }[event];
+        if (petKind !== undefined) notePetActivity(petKind);
       } catch (error) {
         /* Local metrics are best effort and never contain conversation text. */
       }
@@ -1470,7 +1807,7 @@ window.__ModuleLoader__.load({
       'settings.pageHistory': '接力历史',
       'settings.pageClear': '清空本地数据',
       'settings.pageClearConfirm': '确认清空本地数据？',
-      'settings.pageClearHint': '会清除接力历史、本地统计、草稿快照、快捷小窗位置和插件偏好；不会影响 DeepSeek 登录态。',
+      'settings.pageClearHint': '会清除接力历史、本地统计、草稿快照、快捷小窗位置、桌宠养成和插件偏好；不会影响 DeepSeek 登录态。',
       'settings.pageCleared': '本地数据已清空',
       'composer.latest': '最近接力 {time} · {count} 条',
       'composer.quick': '快速提问',
@@ -1636,6 +1973,53 @@ window.__ModuleLoader__.load({
       'scenario.copy': '文案撰写',
       'scenario.copy.prompt':
         '请为下面的产品写三版文案：分别面向新用户、犹豫用户和老用户；每版包含标题、一句话卖点和行动号召。',
+      'pet.defaultName': '小鲸',
+      'pet.label': '{name} · DeepSeek 桌宠',
+      'pet.thinking': 'DeepSeek 正在想…',
+      'pet.done': '回复好了，要接力吗？',
+      'pet.idle': '我在这儿。点我快速提问。',
+      'pet.sleep': 'Zzz… 我先眯一会儿。',
+      'pet.nameLine': '{name} · Lv.{level} {title}',
+      'pet.xp': '{xp} / {next} XP',
+      'pet.max': '{xp} XP · 满级',
+      'pet.streak': '连续 {days} 天',
+      'pet.quick': '快速提问',
+      'pet.handoff': '接力',
+      'pet.collapse': '收起',
+      'pet.expand': '展开',
+      'pet.bossHint': 'Ctrl/⌘+Shift+H 防投屏',
+      'pet.achievement': '成就解锁 · {name}',
+      'pet.level.1': '小鲸苗',
+      'pet.level.2': '幼鲸',
+      'pet.level.3': '潜水员',
+      'pet.level.4': '领航鲸',
+      'pet.level.5': '深潜者',
+      'pet.level.6': '鲸语者',
+      'pet.level.7': '洋流学者',
+      'pet.level.8': '深海船长',
+      'pet.level.9': '鲸群领袖',
+      'pet.level.10': '传说鲸',
+      'pet.ach.first-open': '第一次打开',
+      'pet.ach.first-handoff': '首次接力',
+      'pet.ach.ten-handoffs': '接力十次',
+      'pet.ach.first-review': '首次复核',
+      'pet.ach.streak-3': '连续三天',
+      'pet.ach.streak-7': '连续七天',
+      'pet.ach.night-owl': '深夜鲸鱼',
+      'pet.ach.boss-first': '第一次防投屏',
+      'pet.ach.level-5': '深潜者',
+      'boss.title': 'harness · build',
+      'boss.label': '防投屏画面',
+      'boss.running': 'watching for file changes…',
+      'boss.hint': '再按一次 Ctrl/⌘+Shift+H 返回',
+      'shortcut.boss': '防投屏：遮住 DeepSeek 面板',
+      'menu.boss': '防投屏（Ctrl/⌘+Shift+H）',
+      'settings.pet': '显示鲸鱼桌宠',
+      'settings.petHint': 'DeepSeek 思考时它会下潜，回复完成时跃出水面；纯本地，不读取对话内容。',
+      'settings.petName': '桌宠名字',
+      'settings.petNameHint': '留空则叫「小鲸」，最多 12 个字。',
+      'settings.bossKey': '启用防投屏快捷键',
+      'settings.bossKeyHint': 'Ctrl/⌘+Shift+H 把整个窗口换成构建日志画面，再按一次或按 Esc 返回。',
     };
 
     const en = {
@@ -1902,7 +2286,7 @@ window.__ModuleLoader__.load({
       'settings.pageHistory': 'Handoff history',
       'settings.pageClear': 'Clear local data',
       'settings.pageClearConfirm': 'Confirm clearing local data?',
-      'settings.pageClearHint': 'Clears handoff history, local counters, draft snapshots, quick-window position and plugin preferences. DeepSeek sign-in is not affected.',
+      'settings.pageClearHint': 'Clears handoff history, local counters, draft snapshots, quick-window position, pet progress and plugin preferences. DeepSeek sign-in is not affected.',
       'settings.pageCleared': 'Local data cleared',
       'composer.latest': 'Last handoff {time} · {count} msg',
       'composer.quick': 'Quick ask',
@@ -2070,6 +2454,55 @@ window.__ModuleLoader__.load({
       'scenario.copy': 'Copywriting',
       'scenario.copy.prompt':
         'Write three versions of copy for the product below: for new users, hesitant users and existing users. Each version needs a headline, one-line value proposition and call to action.',
+      'pet.defaultName': 'Moby',
+      'pet.label': '{name} · DeepSeek desk pet',
+      'pet.thinking': 'DeepSeek is thinking…',
+      'pet.done': 'The reply is ready. Hand it off?',
+      'pet.idle': "I'm here. Click me to ask something.",
+      'pet.sleep': 'Zzz… just resting my fins.',
+      'pet.nameLine': '{name} · Lv.{level} {title}',
+      'pet.xp': '{xp} / {next} XP',
+      'pet.max': '{xp} XP · max level',
+      'pet.streak': 'Day {days} in a row',
+      'pet.quick': 'Quick ask',
+      'pet.handoff': 'Hand off',
+      'pet.collapse': 'Tuck away',
+      'pet.expand': 'Bring back',
+      'pet.bossHint': 'Ctrl/⌘+Shift+H for the cover',
+      'pet.achievement': 'Achievement · {name}',
+      'pet.level.1': 'Little Whale',
+      'pet.level.2': 'Calfling',
+      'pet.level.3': 'Diver',
+      'pet.level.4': 'Pilot Whale',
+      'pet.level.5': 'Deep Diver',
+      'pet.level.6': 'Whale Whisperer',
+      'pet.level.7': 'Current Scholar',
+      'pet.level.8': 'Deep-sea Captain',
+      'pet.level.9': 'Pod Leader',
+      'pet.level.10': 'Legendary Whale',
+      'pet.ach.first-open': 'First visit',
+      'pet.ach.first-handoff': 'First handoff',
+      'pet.ach.ten-handoffs': 'Ten handoffs',
+      'pet.ach.first-review': 'First review',
+      'pet.ach.streak-3': 'Three days in a row',
+      'pet.ach.streak-7': 'Seven days in a row',
+      'pet.ach.night-owl': 'Night whale',
+      'pet.ach.boss-first': 'First cover screen',
+      'pet.ach.level-5': 'Deep Diver',
+      'boss.title': 'harness · build',
+      'boss.label': 'Presentation cover',
+      'boss.running': 'watching for file changes…',
+      'boss.hint': 'Press Ctrl/⌘+Shift+H again to return',
+      'shortcut.boss': 'Cover the DeepSeek panel for screen sharing',
+      'menu.boss': 'Presentation cover (Ctrl/⌘+Shift+H)',
+      'settings.pet': 'Show the whale desk pet',
+      'settings.petHint':
+        'It dives while DeepSeek thinks and leaps when a reply lands. Local only; it never reads the conversation.',
+      'settings.petName': 'Pet name',
+      'settings.petNameHint': 'Leave empty for "Moby"; up to 12 characters.',
+      'settings.bossKey': 'Enable the presentation cover shortcut',
+      'settings.bossKeyHint':
+        'Ctrl/⌘+Shift+H swaps the window for a build log; press it again or Esc to return.',
     };
 
     const CSS = `
@@ -3444,6 +3877,337 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   .dsh-dsc-preview-actions { margin-left: 0; width: 100%; justify-content: flex-end; }
   .dsh-dsc-form-row { flex-direction: column; gap: 6px; }
 }
+
+/* --- V2.4 whale desk pet ------------------------------------------------ */
+.dsh-dsc-pet {
+  --dsh-dsc-pet-blue: #4d6bfe;
+  position: absolute;
+  z-index: 22;
+  width: 54px;
+  height: 54px;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  transition: width 160ms ease, height 160ms ease, opacity 160ms ease;
+}
+.dsh-dsc-pet-min { width: 26px; height: 26px; }
+.dsh-dsc-pet-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dsh-dsc-pet-blue);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dsh-dsc-pet-button:active { cursor: grabbing; }
+.dsh-dsc-pet-button:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 3px;
+}
+.dsh-dsc-pet-whale {
+  width: 44px;
+  height: 44px;
+  filter: drop-shadow(0 6px 10px rgba(31, 58, 147, 0.24));
+  transition: transform 220ms ease;
+}
+.dsh-dsc-pet-min .dsh-dsc-pet-whale { width: 22px; height: 22px; }
+.dsh-dsc-pet-button:hover .dsh-dsc-pet-whale { transform: translateY(-2px) scale(1.04); }
+.dsh-dsc-pet[data-mode='idle'] .dsh-dsc-pet-whale { animation: dsh-dsc-pet-bob 3.4s ease-in-out infinite; }
+.dsh-dsc-pet[data-mode='thinking'] .dsh-dsc-pet-whale { animation: dsh-dsc-pet-dive 1.5s ease-in-out infinite; }
+.dsh-dsc-pet[data-mode='done'] .dsh-dsc-pet-whale { animation: dsh-dsc-pet-leap 900ms ease-out 1; }
+.dsh-dsc-pet[data-mode='sleep'] { opacity: 0.72; }
+.dsh-dsc-pet[data-mode='sleep'] .dsh-dsc-pet-whale { animation: dsh-dsc-pet-breathe 4.6s ease-in-out infinite; }
+.dsh-dsc-pet-bubbles {
+  position: absolute;
+  left: 50%;
+  top: -4px;
+  width: 30px;
+  height: 26px;
+  pointer-events: none;
+}
+.dsh-dsc-pet-bubbles span {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  border: 1.2px solid var(--dsh-dsc-pet-blue);
+  border-radius: 50%;
+  opacity: 0;
+  animation: dsh-dsc-pet-bubble 1.8s ease-out infinite;
+}
+.dsh-dsc-pet-bubbles span:nth-child(2) { width: 4px; height: 4px; margin-left: 4px; animation-delay: 0.5s; }
+.dsh-dsc-pet-bubbles span:nth-child(3) { width: 3px; height: 3px; margin-left: -7px; animation-delay: 1s; }
+.dsh-dsc-pet-badge {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--dsw-alias-bg-base);
+  pointer-events: none;
+}
+.dsh-dsc-pet-costume {
+  position: absolute;
+  top: -9px;
+  right: -5px;
+  font-size: 16px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.22));
+  pointer-events: none;
+}
+.dsh-dsc-pet-zzz {
+  position: absolute;
+  top: -8px;
+  right: -2px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  animation: dsh-dsc-pet-zzz 2.8s ease-in-out infinite;
+  pointer-events: none;
+}
+.dsh-dsc-pet-bubble {
+  position: absolute;
+  top: 50%;
+  box-sizing: border-box;
+  width: 222px;
+  padding: 9px 10px;
+  transform: translateY(-50%);
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: default;
+}
+.dsh-dsc-pet-bubble-left { right: calc(100% + 10px); }
+.dsh-dsc-pet-bubble-right { left: calc(100% + 10px); }
+.dsh-dsc-pet-bubble-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.dsh-dsc-pet-bubble-title small {
+  margin-left: auto;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.dsh-dsc-pet-bubble-status {
+  margin: 4px 0 7px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-dsc-pet-meter {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+.dsh-dsc-pet-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #4d6bfe, #8aa6ff);
+}
+.dsh-dsc-pet-bubble-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+}
+.dsh-dsc-pet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.dsh-dsc-pet-actions button {
+  height: 24px;
+  padding: 0 9px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.dsh-dsc-pet-actions button:hover {
+  border-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-state-business-primary);
+}
+.dsh-dsc-pet-actions button.dsh-dsc-pet-primary {
+  border-color: transparent;
+  background: var(--dsw-alias-state-business-primary);
+  color: #fff;
+}
+.dsh-dsc-pet-achievement {
+  margin-top: 7px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: color-mix(in srgb, #f5b301 16%, transparent);
+  color: #8a5a00;
+  font-size: 11px;
+}
+.dsh-dsc-panel-quick .dsh-dsc-pet { display: none; }
+
+@keyframes dsh-dsc-pet-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes dsh-dsc-pet-dive {
+  0%, 100% { transform: translateY(1px) rotate(-2deg); }
+  50% { transform: translateY(7px) rotate(-9deg); }
+}
+@keyframes dsh-dsc-pet-leap {
+  0% { transform: translateY(2px) scale(0.96); }
+  35% { transform: translateY(-17px) rotate(-7deg) scale(1.06); }
+  70% { transform: translateY(-4px) rotate(2deg); }
+  100% { transform: translateY(0); }
+}
+@keyframes dsh-dsc-pet-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+@keyframes dsh-dsc-pet-bubble {
+  0% { opacity: 0; transform: translate(0, 0) scale(0.7); }
+  20% { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(3px, -20px) scale(1.1); }
+}
+@keyframes dsh-dsc-pet-zzz {
+  0%, 100% { opacity: 0.35; transform: translateY(0); }
+  50% { opacity: 0.9; transform: translateY(-3px); }
+}
+
+/* --- V2.4 presentation cover -------------------------------------------- */
+.dsh-dsc-boss {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  background: #080b11;
+  color: #c9d1d9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  cursor: default;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dsh-dsc-boss:focus { outline: none; }
+.dsh-dsc-boss-window {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  background: #0b1018;
+}
+.dsh-dsc-boss-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  height: 42px;
+  padding: 0 14px;
+  border-bottom: 1px solid #1c2533;
+  background: #0e141d;
+  color: #8b949e;
+  font-size: 12px;
+}
+.dsh-dsc-boss-dots { display: inline-flex; gap: 6px; }
+.dsh-dsc-boss-dots i { width: 10px; height: 10px; border-radius: 50%; background: #30363d; }
+.dsh-dsc-boss-dots i:nth-child(1) { background: #ff5f57; }
+.dsh-dsc-boss-dots i:nth-child(2) { background: #febc2e; }
+.dsh-dsc-boss-dots i:nth-child(3) { background: #28c840; }
+.dsh-dsc-boss-title { font-weight: 600; color: #c9d1d9; }
+.dsh-dsc-boss-clock { margin-left: auto; font-variant-numeric: tabular-nums; }
+.dsh-dsc-boss-close {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #1c2533;
+  border-radius: 6px;
+  background: transparent;
+  color: #8b949e;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.dsh-dsc-boss-close:hover { border-color: #30363d; color: #c9d1d9; }
+.dsh-dsc-boss-log {
+  flex: 1 1 auto;
+  overflow: hidden;
+  padding: 18px 22px;
+  font-size: 12.5px;
+  line-height: 1.75;
+}
+.dsh-dsc-boss-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #8b949e;
+}
+.dsh-dsc-boss-line-cmd { margin-top: 7px; color: #79c0ff; font-weight: 600; }
+.dsh-dsc-boss-line-ok { color: #7ee787; }
+.dsh-dsc-boss-line-info { color: #c9d1d9; }
+.dsh-dsc-boss-line-dim { color: #6e7681; }
+.dsh-dsc-boss-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 2px;
+  background: #7ee787;
+  vertical-align: -2px;
+  animation: dsh-dsc-boss-blink 1.05s steps(1) infinite;
+}
+.dsh-dsc-boss-foot {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  height: 34px;
+  padding: 0 14px;
+  border-top: 1px solid #1c2533;
+  color: #6e7681;
+  font-size: 11.5px;
+}
+.dsh-dsc-boss-hint { opacity: 0.7; }
+
+@keyframes dsh-dsc-boss-blink {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dsh-dsc-pet,
+  .dsh-dsc-pet * {
+    animation: none !important;
+    transition: none !important;
+  }
+  .dsh-dsc-boss-cursor { animation: none; }
+}
 `;
 
     let panelRect = null;
@@ -3939,6 +4703,26 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           d: 'm13.5 6.3 1.3 1.3',
           stroke: 'currentColor',
           strokeWidth: 1.2,
+          strokeLinecap: 'round',
+        }),
+      );
+    }
+
+    function BossGlyph({ size = 15 }) {
+      return h(
+        'svg',
+        { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, focusable: false },
+        h('path', {
+          d: 'M1.6 8s2.5-4.1 6.4-4.1S14.4 8 14.4 8s-2.5 4.1-6.4 4.1S1.6 8 1.6 8Z',
+          stroke: 'currentColor',
+          strokeWidth: 1.2,
+          strokeLinejoin: 'round',
+        }),
+        h('circle', { cx: 8, cy: 8, r: 1.85, stroke: 'currentColor', strokeWidth: 1.2 }),
+        h('path', {
+          d: 'M2.4 13.6 13.6 2.4',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
           strokeLinecap: 'round',
         }),
       );
@@ -6006,6 +6790,260 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       };
     }
 
+    function petInitialMode() {
+      const mood = getPetMood();
+      if (mood.at === 0 || Date.now() - mood.at > 60000) return 'idle';
+      if (mood.mode === 'thinking') return 'thinking';
+      if (mood.mode === 'done') return 'done';
+      return 'idle';
+    }
+
+    function petCostumeOf(level) {
+      if (level >= 9) return '👑';
+      if (level >= 7) return '🥽';
+      if (level >= 5) return '🧣';
+      if (level >= 3) return '⭐';
+      return '';
+    }
+
+    function WhalePet({ t, settings, phase, onQuick, onHandoff }) {
+      const ui = useUiSnapshot();
+      const [pos, setPos] = React.useState(() => loadPetPos());
+      const [bubble, setBubble] = React.useState(false);
+      const [minimized, setMinimized] = React.useState(false);
+      const [mode, setMode] = React.useState(petInitialMode);
+      const [achievement, setAchievement] = React.useState('');
+      const [pet, setPet] = React.useState(() => loadPetState());
+      const mood = React.useSyncExternalStore(subscribePet, getPetMood, getPetMood);
+      const posRef = React.useRef(pos);
+      const dragRef = React.useRef(null);
+      const suppressClickRef = React.useRef(false);
+      posRef.current = pos;
+
+      React.useEffect(() => {
+        if (mood.at === 0) return;
+        setPet(loadPetState());
+        if (mood.mode === 'thinking') setMode('thinking');
+        else if (mood.mode === 'done') setMode('done');
+        else if (mood.mode === 'achievement' && typeof mood.detail === 'string' && mood.detail !== '') {
+          setAchievement(mood.detail);
+        } else if (mood.mode === 'open') setMode((current) => (current === 'sleep' ? 'idle' : current));
+      }, [mood]);
+
+      React.useEffect(() => {
+        if (mode !== 'done') return undefined;
+        const timer = window.setTimeout(() => setMode('idle'), 2400);
+        return () => window.clearTimeout(timer);
+      }, [mode]);
+
+      React.useEffect(() => {
+        if (achievement === '') return undefined;
+        const timer = window.setTimeout(() => setAchievement(''), 5200);
+        return () => window.clearTimeout(timer);
+      }, [achievement]);
+
+      React.useEffect(() => {
+        if (mode === 'thinking' || mode === 'done') return undefined;
+        const timer = window.setTimeout(() => setMode('sleep'), 5 * 60 * 1000);
+        return () => window.clearTimeout(timer);
+      }, [mode, mood.at]);
+
+      const startDrag = (event) => {
+        if (event.button !== 0) return;
+        suppressClickRef.current = false;
+        const panel = event.currentTarget.closest('.dsh-dsc-panel');
+        if (panel === null) return;
+        const rect = panel.getBoundingClientRect();
+        dragRef.current = {
+          left: rect.left,
+          top: rect.top,
+          width: Math.max(1, rect.width),
+          height: Math.max(1, rect.height),
+          startX: event.clientX,
+          startY: event.clientY,
+          startPos: posRef.current,
+          moved: false,
+        };
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch (error) {
+          /* Pointer capture is best effort. */
+        }
+      };
+
+      const moveDrag = (event) => {
+        const drag = dragRef.current;
+        if (drag === null) return;
+        const dx = event.clientX - drag.startX;
+        const dy = event.clientY - drag.startY;
+        if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
+        drag.moved = true;
+        setPos(
+          normalizePetPos({
+            x: drag.startPos.x + dx / drag.width,
+            y: drag.startPos.y + dy / drag.height,
+          }),
+        );
+      };
+
+      const endDrag = (event) => {
+        const drag = dragRef.current;
+        if (drag === null) return;
+        dragRef.current = null;
+        suppressClickRef.current = drag.moved;
+        if (drag.moved) savePetPos(posRef.current);
+        try {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        } catch (error) {
+          /* Pointer capture is best effort. */
+        }
+      };
+
+      const toggleBubble = () => {
+        setBubble((value) => !value);
+        if (mode === 'sleep') setMode('idle');
+      };
+
+      const level = petLevelOf(pet.xp);
+      const name = (settings.petName || '').trim() || t('pet.defaultName');
+      const costume = petCostumeOf(level.level);
+      const statusKey =
+        mode === 'thinking'
+          ? 'pet.thinking'
+          : mode === 'done'
+            ? 'pet.done'
+            : mode === 'sleep'
+              ? 'pet.sleep'
+              : 'pet.idle';
+      const side = pos.x > 0.55 ? 'left' : 'right';
+      const bubbleNode =
+        bubble && !minimized
+          ? h(
+              'div',
+              {
+                className: 'dsh-dsc-pet-bubble dsh-dsc-pet-bubble-' + side,
+                role: 'dialog',
+                'aria-label': t('pet.label', { name }),
+              },
+              h(
+                'div',
+                { className: 'dsh-dsc-pet-bubble-title' },
+                h('span', null, t('pet.nameLine', { name, level: level.level, title: t(petTitleKey(level.level)) })),
+                pet.streak > 1 ? h('small', null, t('pet.streak', { days: pet.streak })) : null,
+              ),
+              h('div', { className: 'dsh-dsc-pet-bubble-status' }, t(statusKey)),
+              h('div', { className: 'dsh-dsc-pet-meter', 'aria-hidden': true }, h('span', { style: { width: level.progress * 100 + '%' } })),
+              h(
+                'div',
+                { className: 'dsh-dsc-pet-bubble-meta' },
+                h('span', null, level.next === null ? t('pet.max', { xp: level.xp }) : t('pet.xp', { xp: level.xp, next: level.next })),
+                settings.bossKey === true ? h('span', null, t('pet.bossHint')) : null,
+              ),
+              achievement !== ''
+                ? h('div', { className: 'dsh-dsc-pet-achievement' }, t('pet.achievement', { name: t('pet.ach.' + achievement) }))
+                : null,
+              h(
+                'div',
+                { className: 'dsh-dsc-pet-actions' },
+                phase === 'ready'
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-dsc-pet-primary',
+                        onClick: () => {
+                          setBubble(false);
+                          onQuick();
+                        },
+                      },
+                      t('pet.quick'),
+                    )
+                  : null,
+                phase === 'ready' && mode !== 'thinking'
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        onClick: () => {
+                          setBubble(false);
+                          onHandoff();
+                        },
+                      },
+                      t('pet.handoff'),
+                    )
+                  : null,
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    onClick: () => {
+                      setBubble(false);
+                      setMinimized(true);
+                    },
+                  },
+                  t('pet.collapse'),
+                ),
+              ),
+            )
+          : null;
+
+      return h(
+        'div',
+        {
+          className: 'dsh-dsc-pet' + (minimized ? ' dsh-dsc-pet-min' : ''),
+          style: { left: pos.x * 100 + '%', top: pos.y * 100 + '%' },
+          'data-mode': mode,
+        },
+        bubbleNode,
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-dsc-pet-button',
+            'aria-label': t('pet.label', { name }),
+            'aria-expanded': bubble,
+            title: t('pet.label', { name }),
+            onPointerDown: startDrag,
+            onPointerMove: moveDrag,
+            onPointerUp: endDrag,
+            onPointerCancel: endDrag,
+            onClick: () => {
+              if (suppressClickRef.current) {
+                suppressClickRef.current = false;
+                return;
+              }
+              if (minimized) {
+                setMinimized(false);
+                return;
+              }
+              toggleBubble();
+            },
+          },
+          h(
+            'svg',
+            { className: 'dsh-dsc-pet-whale', viewBox: '0 0 50 50', 'aria-hidden': true, focusable: false },
+            h('path', { d: WHALE_PATH, fill: 'currentColor', fillRule: 'nonzero' }),
+          ),
+          costume !== '' ? h('span', { className: 'dsh-dsc-pet-costume', 'aria-hidden': true }, costume) : null,
+          ui.unread > 0
+            ? h(
+                'span',
+                { className: 'dsh-dsc-pet-badge', 'aria-hidden': true },
+                ui.unread > 9 ? '9+' : String(ui.unread),
+              )
+            : null,
+          mode === 'thinking'
+            ? h(
+                'span',
+                { className: 'dsh-dsc-pet-bubbles', 'aria-hidden': true },
+                [0, 1, 2].map((index) => h('span', { key: index })),
+              )
+            : null,
+          mode === 'sleep' ? h('span', { className: 'dsh-dsc-pet-zzz', 'aria-hidden': true }, 'Zzz') : null,
+        ),
+      );
+    }
+
     function ChatPanelSeat() {
       const seatRef = React.useRef(null);
 
@@ -6452,6 +7490,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 
       handleReplyDoneRef.current = (payload) => {
         if (payload === null || typeof payload !== 'object') return;
+        emitPet('done', { title: payload.title, preview: payload.preview });
+        notePetActivity('done');
         const visibleNow = visibleRef.current && !document.hidden;
         const pendingReview = reviewStore.getSnapshot();
         if (pendingReview !== null && pendingReview.status === 'waiting') {
@@ -7582,6 +8622,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             cancelQuickDrag();
             return;
           }
+          if (getBossVisible()) {
+            setBossVisible(false);
+            return;
+          }
           if (quickResizeRef.current !== null) {
             // Same for a size drag: Esc restores the previous rectangle.
             cancelQuickResize();
@@ -7926,6 +8970,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           }
           if (message.startsWith('__DSH_DSC_SENT__')) {
             reviewStore.markSent();
+            emitPet('thinking');
           }
           if (message.startsWith('__DSH_DSC_ESC__')) {
             handleEscRef.current?.();
@@ -9544,6 +10589,26 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               settingsCheck('notify', 'settings.notify', null),
               settingsCheck('dedupe', 'settings.dedupe', null),
               settingsCheck('autoSend', 'settings.autoSend', 'settings.autoSendHint'),
+              settingsCheck('pet', 'settings.pet', 'settings.petHint'),
+              settingsRow(
+                'settings.petName',
+                'settings.petNameHint',
+                h('input', {
+                  className: 'dsh-dsc-input',
+                  type: 'text',
+                  spellCheck: false,
+                  maxLength: PET_NAME_MAX,
+                  defaultValue: settings.petName,
+                  placeholder: t('pet.defaultName'),
+                  onBlur: (event) => {
+                    const value = String(event.target.value || '')
+                      .trim()
+                      .slice(0, PET_NAME_MAX);
+                    if (value !== settings.petName) updateSetting('petName', value);
+                  },
+                }),
+              ),
+              settingsCheck('bossKey', 'settings.bossKey', 'settings.bossKeyHint'),
               settingsCheck('remoteSelectors', 'settings.remoteSelectors', 'settings.remoteSelectorsHint'),
               settingsRow(
                 'settings.selectorUrl',
@@ -10334,6 +11399,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                           h('span', null, t('review.menu')),
                         )
                       : null,
+                    settings.bossKey === true
+                      ? h(
+                          'button',
+                          {
+                            type: 'button',
+                            role: 'menuitem',
+                            className: 'dsh-dsc-menu-item',
+                            onClick: () => {
+                              setMenuOpen(false);
+                              toggleBossVisible();
+                            },
+                          },
+                          h('span', { className: 'dsh-dsc-menu-check' }, h(BossGlyph, { size: 13 })),
+                          h('span', null, t('menu.boss')),
+                        )
+                      : null,
                     h(
                       'button',
                       {
@@ -10479,6 +11560,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           settingsNode,
           historyNode,
           reverseNode,
+          settings.pet === true && visible && !quick
+            ? h(WhalePet, {
+                t,
+                settings,
+                phase,
+                onQuick: () => {
+                  setOpened(true);
+                  setDocked(false);
+                  setQuick(true);
+                  setQuickRect(restoreQuickPosition());
+                  track('dsc_open', { source: 'pet' });
+                },
+                onHandoff: () => {
+                  void runHandoff(settingsRef.current.defaultMode);
+                },
+              })
+            : null,
           quick && quickSnapZone
             ? h(
                 'div',
@@ -10558,6 +11656,119 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         ),
         error === '' ? h('button', { type: 'button', onClick: undo }, t('handoff.undo')) : null,
         h('button', { type: 'button', onClick: () => undoStore.set(null) }, t('undo.dismiss')),
+      );
+    }
+
+    function bossClockText(date) {
+      const pad = (value) => String(value).padStart(2, '0');
+      return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
+    }
+
+    /**
+     * Full-window presentation cover. It keeps working while the DeepSeek page
+     * is open and never touches panel state: one key hides everything behind a
+     * deterministic build log, and the same key (or Esc) brings it back.
+     */
+    function BossScreen({ t }) {
+      const on = React.useSyncExternalStore(subscribeBoss, getBossVisible, getBossVisible);
+      const [lines, setLines] = React.useState([]);
+      const [clock, setClock] = React.useState(() => bossClockText(new Date()));
+      const logRef = React.useRef(null);
+      const rootRef = React.useRef(null);
+
+      React.useEffect(() => {
+        if (!on) return undefined;
+        const node = rootRef.current;
+        if (node !== null && typeof node.focus === 'function') node.focus();
+        return undefined;
+      }, [on]);
+
+      React.useEffect(() => {
+        if (!on) return undefined;
+        const script = buildBossLog(petDayNumberOf(Date.now()), 90);
+        setLines(script.slice(0, 14));
+        let cursor = 14;
+        const timer = window.setInterval(() => {
+          cursor += 2;
+          if (cursor > script.length) cursor = 12;
+          setLines(script.slice(0, Math.min(cursor, script.length)));
+        }, 620);
+        return () => window.clearInterval(timer);
+      }, [on]);
+
+      React.useEffect(() => {
+        if (!on) return undefined;
+        setClock(bossClockText(new Date()));
+        const timer = window.setInterval(() => setClock(bossClockText(new Date())), 1000);
+        return () => window.clearInterval(timer);
+      }, [on]);
+
+      React.useEffect(() => {
+        if (!on) return undefined;
+        const onKeyDown = (event) => {
+          if (event.key !== 'Escape') return;
+          event.preventDefault();
+          event.stopPropagation();
+          setBossVisible(false);
+        };
+        window.addEventListener('keydown', onKeyDown, true);
+        return () => window.removeEventListener('keydown', onKeyDown, true);
+      }, [on]);
+
+      React.useEffect(() => {
+        if (!on) return;
+        const node = logRef.current;
+        if (node !== null) node.scrollTop = node.scrollHeight;
+      }, [lines, on]);
+
+      if (!on) return null;
+
+      return h(
+        'div',
+        {
+          ref: rootRef,
+          className: 'dsh-dsc-boss',
+          role: 'presentation',
+          tabIndex: -1,
+          'aria-label': t('boss.label'),
+          title: t('boss.hint'),
+        },
+        h(
+          'div',
+          { className: 'dsh-dsc-boss-window' },
+          h(
+            'div',
+            { className: 'dsh-dsc-boss-head' },
+            h('span', { className: 'dsh-dsc-boss-dots', 'aria-hidden': true }, h('i'), h('i'), h('i')),
+            h('span', { className: 'dsh-dsc-boss-title' }, t('boss.title')),
+            h('span', { className: 'dsh-dsc-boss-clock' }, clock),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-dsc-boss-close',
+                onClick: () => setBossVisible(false),
+                title: t('boss.hint'),
+                'aria-label': t('settings.close'),
+              },
+              '\u00d7',
+            ),
+          ),
+          h(
+            'div',
+            { ref: logRef, className: 'dsh-dsc-boss-log' },
+            lines.map((line, index) =>
+              h('div', { key: index, className: 'dsh-dsc-boss-line dsh-dsc-boss-line-' + line.kind }, line.text),
+            ),
+            h('div', { className: 'dsh-dsc-boss-line' }, h('span', { className: 'dsh-dsc-boss-cursor' })),
+          ),
+          h(
+            'div',
+            { className: 'dsh-dsc-boss-foot' },
+            h('span', null, t('boss.running')),
+            h('span', { className: 'dsh-dsc-boss-hint' }, t('boss.hint')),
+          ),
+        ),
       );
     }
 
@@ -10686,6 +11897,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           REVIEW_LOG_KEY,
           CHECKPOINT_KEY,
           TEMPLATES_KEY,
+          PET_KEY,
+          PET_POS_KEY,
         ]) {
           try {
             window.localStorage.removeItem(key);
@@ -10696,6 +11909,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         historyStore.set([]);
         reviewStore.set(null);
         updateStore.set(null);
+        setBossVisible(false);
+        emitPet('open');
         setUpdateRecord(null);
         try {
           window.dispatchEvent(new CustomEvent('dsh-deepseek-web-chat:reset'));
@@ -10956,6 +12171,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         'deepseek-web-chat: shortcut handoff',
       );
 
+      registerShortcut(
+        {
+          id: 'deepseek-chat.boss',
+          label: () => t('shortcut.boss'),
+          aliases: ['boss key', 'cover', 'presentation', 'hide deepseek'],
+          defaults: shortcutDefaults('KeyH'),
+          regions: ['page', 'editable', 'terminal'],
+          modals: [],
+          resolve: () => ({ status: 'handled', run: () => void toggleBossVisible() }),
+        },
+        'deepseek-web-chat: shortcut boss',
+      );
+
       try {
         const commandUi = ctx.get('commandUi');
         if (commandUi !== undefined && commandUi !== null && typeof commandUi.register === 'function') {
@@ -11075,6 +12303,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           UndoToast,
         ),
       );
+      ctx.slots.inject('shell.overlay', () =>
+        ctx.slots.register(
+          {
+            name: 'shell.overlay',
+            id: 'deepseek-web-chat.boss',
+            order: 60,
+            locale: NS,
+          },
+          BossScreen,
+        ),
+      );
 
       const openMainPanel = () => {
         if (panelControl !== null && typeof panelControl.open === 'function') {
@@ -11184,6 +12423,32 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         normalizeSettings,
         loadSettings,
         saveSettings,
+        petDayKey,
+        petDayNumberOf,
+        petLevelOf,
+        petTitleKey,
+        normalizePetState,
+        loadPetState,
+        savePetState,
+        touchPetDay,
+        awardPet,
+        unlockPetAchievements,
+        normalizePetPos,
+        loadPetPos,
+        savePetPos,
+        buildBossLog,
+        getBossVisible,
+        setBossVisible,
+        toggleBossVisible,
+        notePetActivity,
+        emitPet,
+        getPetMood,
+        subscribePet,
+        WhalePet,
+        BossScreen,
+        BossGlyph,
+        PET_LEVEL_XP,
+        PET_DAILY_XP_CAP,
         loadHistory,
         saveHistory,
         normalizeDraft,

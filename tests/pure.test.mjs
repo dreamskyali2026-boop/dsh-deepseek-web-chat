@@ -72,6 +72,23 @@ const {
   normalizeSettings,
   loadSettings,
   saveSettings,
+  petDayKey,
+  petLevelOf,
+  normalizePetState,
+  loadPetState,
+  savePetState,
+  touchPetDay,
+  awardPet,
+  unlockPetAchievements,
+  normalizePetPos,
+  loadPetPos,
+  savePetPos,
+  buildBossLog,
+  getBossVisible,
+  setBossVisible,
+  toggleBossVisible,
+  PET_LEVEL_XP,
+  PET_DAILY_XP_CAP,
   loadHistory,
   saveHistory,
   normalizeDraft,
@@ -996,7 +1013,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '2.3.0');
+  assert.equal(parsed.version, '2.4.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -2305,8 +2322,8 @@ test('update records are validated, persisted and published', () => {
   assert.equal(normalizeUpdateRecord({ ok: true, version: '1.2.3' }), null);
   assert.equal(normalizeUpdateRecord(null), null);
   assert.equal(updateStatusOf(null), 'unchecked');
-  assert.equal(updateStatusOf({ ok: true, version: '2.4.0', checkedAt: 1 }), 'available');
-  assert.equal(updateStatusOf({ ok: true, version: '2.3.0', checkedAt: 1 }), 'current');
+  assert.equal(updateStatusOf({ ok: true, version: '9.9.9', checkedAt: 1 }), 'available');
+  assert.equal(updateStatusOf({ ok: true, version: '2.4.0', checkedAt: 1 }), 'current');
   assert.equal(updateStatusOf({ ok: false, version: '', checkedAt: 1 }), 'error');
 
   let notifications = 0;
@@ -2349,7 +2366,7 @@ test('refreshUpdate caches a fresh result and records failures', async () => {
   let calls = 0;
   const manifest = async () => {
     calls += 1;
-    return { ok: true, json: async () => ({ version: '2.4.0' }) };
+    return { ok: true, json: async () => ({ version: '9.9.9' }) };
   };
   assert.equal(await refreshUpdate({ force: true, fetch: manifest }), 'available');
   assert.equal(calls, 1);
@@ -2363,11 +2380,11 @@ test('refreshUpdate caches a fresh result and records failures', async () => {
 
 test('updateStatusText explains cached states without leaking anything', () => {
   const available = updateStatusText(
-    { ok: true, version: '2.4.0', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
+    { ok: true, version: '9.9.9', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
     t,
   );
   assert.match(available, /settings\.updateAvailable/);
-  assert.match(available, /version=2\.4\.0/);
+  assert.match(available, /version=9\.9\.9/);
   assert.equal(updateStatusText(null, t), 'settings.updateUnchecked');
   assert.equal(updateStatusText({ ok: false, version: '', checkedAt: 1, error: 'x' }, t), 'settings.updateError');
 });
@@ -3253,4 +3270,152 @@ test('custom templates persist separately from settings', () => {
     saveCustomTemplates([]);
     globalThis.window = previous;
   }
+});
+
+test('pet levels follow the xp thresholds', () => {
+  assert.equal(petLevelOf(0).level, 1);
+  assert.equal(petLevelOf(5).level, 1);
+  assert.equal(petLevelOf(6).level, 2);
+  assert.equal(petLevelOf(320).level, 10);
+  assert.equal(petLevelOf(9999).level, 10);
+  assert.equal(PET_LEVEL_XP.length, 10);
+  const mid = petLevelOf(20);
+  assert.equal(mid.level, 3);
+  assert.equal(mid.base, 16);
+  assert.equal(mid.next, 32);
+  assert.equal(mid.into, 4);
+  assert.equal(Math.round(mid.progress * 100), 25);
+  assert.equal(petLevelOf(9999).progress, 1);
+});
+
+test('pet state normalizes counters and achievements', () => {
+  const state = normalizePetState({
+    xp: -5,
+    streak: 3.6,
+    days: 2,
+    lastDay: '2026-10-29T10:00:00Z',
+    dayXp: 999,
+    achievements: ['first-open', 'first-open', 'nope', 42, 'streak-3'],
+  });
+  assert.equal(state.xp, 0);
+  assert.equal(state.streak, 4);
+  assert.equal(state.lastDay, '2026-10-29');
+  assert.equal(state.dayXp, PET_DAILY_XP_CAP);
+  assert.deepEqual(state.achievements, ['first-open', 'streak-3']);
+});
+
+test('pet streak counts consecutive local days and resets after a gap', () => {
+  const day1 = new Date(2026, 9, 27, 12).getTime();
+  const day2 = new Date(2026, 9, 28, 9).getTime();
+  const day3 = new Date(2026, 9, 29, 23).getTime();
+  const gap = new Date(2026, 10, 2, 9).getTime();
+  let step = touchPetDay(normalizePetState({}), day1);
+  assert.equal(step.fresh, true);
+  assert.equal(step.state.streak, 1);
+  step = touchPetDay(step.state, day1 + 60 * 60 * 1000);
+  assert.equal(step.fresh, false);
+  assert.equal(step.state.streak, 1);
+  step = touchPetDay(step.state, day2);
+  assert.equal(step.state.streak, 2);
+  step = touchPetDay(step.state, day3);
+  assert.equal(step.state.streak, 3);
+  step = touchPetDay(step.state, gap);
+  assert.equal(step.state.streak, 1);
+  assert.equal(step.state.days, 4);
+});
+
+test('pet xp is capped per day and ignores unknown events', () => {
+  const day = new Date(2026, 9, 29, 12).getTime();
+  let state = normalizePetState({});
+  state = awardPet(state, 'unknown', day);
+  assert.equal(state.xp, 0);
+  for (let index = 0; index < 20; index += 1) state = awardPet(state, 'handoff', day);
+  assert.equal(state.xp, PET_DAILY_XP_CAP);
+  const nextDay = new Date(2026, 9, 30, 9).getTime();
+  state = awardPet(state, 'review', nextDay);
+  assert.equal(state.xp, PET_DAILY_XP_CAP + 4);
+});
+
+test('pet achievements unlock once from counters and streaks', () => {
+  const at = new Date(2026, 9, 29, 2).getTime();
+  const first = unlockPetAchievements(normalizePetState({ streak: 7, xp: 60 }), {
+    counts: { dsc_open: 1, dsc_handoff_ok: 10, dsc_review_captured: 1 },
+    kind: 'boss',
+    now: at,
+  });
+  assert.deepEqual(
+    first.unlocked.slice().sort(),
+    [
+      'boss-first',
+      'first-handoff',
+      'first-open',
+      'first-review',
+      'level-5',
+      'night-owl',
+      'streak-3',
+      'streak-7',
+      'ten-handoffs',
+    ].sort(),
+  );
+  const again = unlockPetAchievements(first.state, { counts: { dsc_open: 1 }, kind: 'open', now: at });
+  assert.deepEqual(again.unlocked, []);
+  assert.equal(again.state.achievements.length, 9);
+});
+
+test('boss cover log is deterministic, bounded and free of newlines', () => {
+  const first = buildBossLog(20261029, 40);
+  const second = buildBossLog(20261029, 40);
+  assert.deepEqual(first, second);
+  assert.equal(first.length, 40);
+  for (const line of first) {
+    assert.equal(typeof line.text, 'string');
+    assert.equal(line.text.includes('\n'), false);
+    assert.ok(line.text.length <= 180);
+    assert.ok(['cmd', 'ok', 'info', 'dim'].includes(line.kind));
+  }
+  assert.notDeepEqual(buildBossLog(1, 40), buildBossLog(2, 40));
+  assert.equal(buildBossLog(1, 0).length, 1);
+  assert.equal(buildBossLog(1, 999).length, 200);
+});
+
+test('settings normalize pet and cover preferences', () => {
+  const defaults = normalizeSettings({});
+  assert.equal(defaults.pet, true);
+  assert.equal(defaults.petName, '');
+  assert.equal(defaults.bossKey, true);
+  const custom = normalizeSettings({ pet: false, petName: '  一只名字特别特别长的鲸鱼宝宝  ', bossKey: false });
+  assert.equal(custom.pet, false);
+  assert.equal(custom.bossKey, false);
+  assert.equal(custom.petName.length, 12);
+});
+
+test('pet position stays inside the panel', () => {
+  assert.deepEqual(normalizePetPos({ x: -1, y: 9 }), { x: 0.04, y: 0.9 });
+  assert.deepEqual(normalizePetPos({ x: 0.5, y: 0.5 }), { x: 0.5, y: 0.5 });
+  assert.deepEqual(normalizePetPos(null), { x: 0.9, y: 0.42 });
+  assert.deepEqual(normalizePetPos({ x: 'nope' }), { x: 0.9, y: 0.42 });
+});
+
+test('pet state and position persist locally', () => {
+  savePetState({ xp: 12, streak: 2, lastDay: '2026-10-29', achievements: ['first-open'] });
+  assert.equal(loadPetState().xp, 12);
+  assert.deepEqual(loadPetState().achievements, ['first-open']);
+  savePetState({});
+  savePetPos({ x: 0.2, y: 0.3 });
+  assert.deepEqual(loadPetPos(), { x: 0.2, y: 0.3 });
+  savePetPos(null);
+  assert.deepEqual(loadPetPos(), { x: 0.9, y: 0.42 });
+});
+
+test('the cover toggles only while the shortcut is enabled', () => {
+  saveSettings({ ...loadSettings(), bossKey: false });
+  setBossVisible(false);
+  assert.equal(toggleBossVisible(), false);
+  assert.equal(getBossVisible(), false);
+  saveSettings({ ...loadSettings(), bossKey: true });
+  assert.equal(toggleBossVisible(), true);
+  assert.equal(getBossVisible(), true);
+  assert.equal(toggleBossVisible(), false);
+  assert.equal(getBossVisible(), false);
+  saveSettings(normalizeSettings({}));
 });
