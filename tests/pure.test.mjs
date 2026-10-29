@@ -106,6 +106,19 @@ const {
   ChatPanel,
   ChatPanelTab,
   createHandoffDelivery,
+  buildReverseContext,
+  fillComposerWithRetry,
+  parseVersion,
+  compareVersions,
+  isNewerVersion,
+  normalizeUpdateRecord,
+  loadUpdateRecord,
+  saveUpdateRecord,
+  updateStore,
+  updateStatusOf,
+  updateStatusText,
+  fetchLatestVersion,
+  refreshUpdate,
 } = plugin.__test;
 
 const t = (key, values = {}) =>
@@ -628,6 +641,8 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
     assert.match(flat, /history\.openSession/);
     assert.match(flat, /history\.sourceFrom/);
     assert.match(flat, /reverse\.title/);
+    assert.match(flat, /reverse\.target/);
+    assert.match(flat, /settings\.about/);
   } finally {
     globalThis.window = previousWindow;
   }
@@ -950,7 +965,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '1.9.0');
+  assert.equal(parsed.version, '2.0.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -1961,7 +1976,9 @@ test('settings section exposes panel actions and local data reset', () => {
   assert.match(flat, /settings\.pageOpen/);
   assert.match(flat, /settings\.pageHistory/);
   assert.match(flat, /settings\.pageClear/);
-  assert.match(flat, /settings\.pageVersion/);
+  assert.match(flat, /settings\.versionLine/);
+  assert.match(flat, /settings\.updateCheck/);
+  assert.match(flat, /settings\.updateUnchecked/);
 });
 
 test('apply registers the panel, composer dock and settings section', () => {
@@ -2208,5 +2225,315 @@ test('review action renders one button and fills the review request', async () =
     assert.match(calls[0], /需求讨论/);
   } finally {
     globalThis.fetch = previousFetch;
+  }
+});
+
+// --- V2.0: update check, reverse handoff targets, Quick Ask ---------------
+
+test('parseVersion accepts SemVer and rejects malformed values', () => {
+  assert.deepEqual(parseVersion('2.0.0'), { major: 2, minor: 0, patch: 0, pre: [] });
+  assert.deepEqual(parseVersion('v1.9.0-rc.1'), { major: 1, minor: 9, patch: 0, pre: ['rc', '1'] });
+  assert.deepEqual(parseVersion('2.0.0+build.7').pre, []);
+  assert.equal(parseVersion('1.2'), null);
+  assert.equal(parseVersion('1.2.3.4'), null);
+  assert.equal(parseVersion(''), null);
+  assert.equal(parseVersion(null), null);
+  assert.equal(parseVersion('x'.repeat(80)), null);
+});
+
+test('compareVersions orders releases and prereleases', () => {
+  assert.equal(compareVersions('2.0.0', '1.9.9'), 1);
+  assert.equal(compareVersions('1.9.9', '2.0.0'), -1);
+  assert.equal(compareVersions('2.0.0', '2.0.0'), 0);
+  assert.equal(compareVersions('2.0.0', '2.0.0-rc.1'), 1);
+  assert.equal(compareVersions('2.0.0-rc.1', '2.0.0-rc.2'), -1);
+  assert.equal(compareVersions('2.0.0-beta.9', '2.0.0-rc.1'), -1);
+  assert.equal(compareVersions('2.0.0-alpha', '2.0.0-alpha.1'), -1);
+  assert.equal(compareVersions('1.0.0', 'bad'), null);
+  assert.equal(isNewerVersion('2.0.1', '2.0.0'), true);
+  assert.equal(isNewerVersion('2.0.0', '2.0.0'), false);
+  assert.equal(isNewerVersion('bad', '2.0.0'), false);
+});
+
+test('update records are validated, persisted and published', () => {
+  window.localStorage.removeItem('dsh-deepseek-web-chat.update.v1');
+  assert.equal(loadUpdateRecord(), null);
+  assert.equal(saveUpdateRecord({ ok: true, version: '2.0.1', checkedAt: 1700000000000 }), true);
+  assert.deepEqual(loadUpdateRecord(), {
+    ok: true,
+    version: '2.0.1',
+    checkedAt: 1700000000000,
+    error: '',
+  });
+  assert.equal(normalizeUpdateRecord({ ok: true, version: 'nope', checkedAt: 1 }).ok, false);
+  assert.equal(normalizeUpdateRecord({ ok: true, version: '1.2.3' }), null);
+  assert.equal(normalizeUpdateRecord(null), null);
+  assert.equal(updateStatusOf(null), 'unchecked');
+  assert.equal(updateStatusOf({ ok: true, version: '2.0.1', checkedAt: 1 }), 'available');
+  assert.equal(updateStatusOf({ ok: true, version: '2.0.0', checkedAt: 1 }), 'current');
+  assert.equal(updateStatusOf({ ok: false, version: '', checkedAt: 1 }), 'error');
+
+  let notifications = 0;
+  const unsubscribe = updateStore.subscribe(() => {
+    notifications += 1;
+  });
+  updateStore.set({ ok: false, version: '', checkedAt: 2, error: 'network' });
+  assert.equal(notifications, 1);
+  assert.equal(updateStatusOf(updateStore.getSnapshot()), 'error');
+  unsubscribe();
+  updateStore.set(null);
+  window.localStorage.removeItem('dsh-deepseek-web-chat.update.v1');
+});
+
+test('fetchLatestVersion reads the manifest and reports failures', async () => {
+  const ok = await fetchLatestVersion({
+    url: 'https://example.test/package.json',
+    fetch: async () => ({ ok: true, json: async () => ({ version: '2.1.0' }) }),
+  });
+  assert.deepEqual(ok, { ok: true, version: '2.1.0' });
+
+  const invalid = await fetchLatestVersion({ fetch: async () => ({ ok: true, json: async () => ({ version: 'next' }) }) });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.error, 'invalid');
+
+  const http = await fetchLatestVersion({ fetch: async () => ({ ok: false, status: 404 }) });
+  assert.equal(http.error, 'http');
+
+  const network = await fetchLatestVersion({
+    fetch: async () => {
+      throw new Error('offline');
+    },
+  });
+  assert.equal(network.error, 'network');
+});
+
+test('refreshUpdate caches a fresh result and records failures', async () => {
+  updateStore.set(null);
+  window.localStorage.removeItem('dsh-deepseek-web-chat.update.v1');
+  let calls = 0;
+  const manifest = async () => {
+    calls += 1;
+    return { ok: true, json: async () => ({ version: '2.0.1' }) };
+  };
+  assert.equal(await refreshUpdate({ force: true, fetch: manifest }), 'available');
+  assert.equal(calls, 1);
+  assert.equal(await refreshUpdate({ force: false, fetch: manifest }), 'available');
+  assert.equal(calls, 1);
+  assert.equal(await refreshUpdate({ force: true, fetch: async () => Promise.reject(new Error('offline')) }), 'error');
+  assert.equal(updateStore.getSnapshot().ok, false);
+  updateStore.set(null);
+  window.localStorage.removeItem('dsh-deepseek-web-chat.update.v1');
+});
+
+test('updateStatusText explains cached states without leaking anything', () => {
+  const available = updateStatusText(
+    { ok: true, version: '2.0.1', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
+    t,
+  );
+  assert.match(available, /settings\.updateAvailable/);
+  assert.match(available, /version=2\.0\.1/);
+  assert.equal(updateStatusText(null, t), 'settings.updateUnchecked');
+  assert.equal(updateStatusText({ ok: false, version: '', checkedAt: 1, error: 'x' }, t), 'settings.updateError');
+});
+
+test('quick window remembers width and height as well as position', () => {
+  saveQuickRect(null);
+  assert.equal(saveQuickRect({ left: 120, top: 60, width: 520, height: 640 }), true);
+  assert.deepEqual(loadQuickRect(), { left: 120, top: 60, width: 520, height: 640 });
+  const base = { left: 10, top: 10, width: 320, height: 420 };
+  assert.deepEqual(restoreQuickRect(base, { left: 40, top: 30, width: 500, height: 600 }, { width: 1200, height: 800 }), {
+    left: 40,
+    top: 30,
+    width: 500,
+    height: 600,
+  });
+  const clamped = restoreQuickRect(base, { left: 40, top: 30, width: 5000, height: 5000 }, { width: 1200, height: 800 });
+  assert.equal(clamped.width, 1200 - 16);
+  assert.equal(clamped.height, 800 - 16);
+  saveQuickRect(null);
+});
+
+test('buildReverseContext labels the session, workspace and selection', () => {
+  const text = buildReverseContext({ title: '需求讨论', cwd: '/work/app' }, 'const a = 1;', t);
+  assert.match(text, /### reverse\.session/);
+  assert.match(text, /需求讨论/);
+  assert.match(text, /\/work\/app/);
+  assert.match(text, /const a = 1;/);
+  const empty = buildReverseContext(undefined, '', t);
+  assert.match(empty, /reverse\.noSession/);
+  assert.match(empty, /reverse\.noWorkspace/);
+  assert.match(empty, /reverse\.noSelection/);
+});
+
+test('fillComposerWithRetry retries until a new conversation mounts its editor', async () => {
+  const calls = [];
+  const view = {
+    async executeJavaScript(source) {
+      calls.push(source);
+      return calls.length < 3 ? { ok: false, reason: 'no-composer' } : { ok: true, kind: 'textarea' };
+    },
+  };
+  const result = await fillComposerWithRetry(view, 'hello', {
+    attempts: 5,
+    intervalMs: 0,
+    sleep: async () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 3);
+  assert.match(calls[0], /hello/);
+});
+
+test('fillComposerWithRetry stops for a draft and gives up cleanly', async () => {
+  const notEmpty = {
+    async executeJavaScript() {
+      return { ok: false, reason: 'not-empty' };
+    },
+  };
+  assert.equal((await fillComposerWithRetry(notEmpty, 'x', { attempts: 4, sleep: async () => {} })).reason, 'not-empty');
+  assert.equal((await fillComposerWithRetry({}, 'x', { attempts: 2 })).reason, 'unsupported');
+  let attempts = 0;
+  const never = {
+    async executeJavaScript() {
+      attempts += 1;
+      return { ok: false, reason: 'no-composer' };
+    },
+  };
+  const failed = await fillComposerWithRetry(never, 'x', { attempts: 3, sleep: async () => {} });
+  assert.equal(failed.reason, 'no-composer');
+  assert.equal(attempts, 3);
+});
+
+test('Quick Ask renders an ask bar and a resize handle', () => {
+  let stateIndex = 0;
+  const states = [];
+  Object.assign(reactStub, {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+      if (index === 0) states[index] = true; // opened
+      if (index === 3) states[index] = 'ready'; // phase
+      if (index === 13) states[index] = 'in'; // auth state
+      if (index === 25) states[index] = true; // quick window
+      return [states[index], () => {}];
+    },
+    useRef(value) {
+      return { current: value };
+    },
+    useEffect() {},
+    useLayoutEffect() {},
+    useCallback(fn) {
+      return fn;
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { ...previousWindow, innerWidth: 1200, innerHeight: 800 };
+  try {
+    const panel = ChatPanel(
+      {
+        back() {},
+        open() {},
+        delivery: {
+          deliver() {
+            return { ok: false, reason: 'no-session' };
+          },
+          restore() {
+            return false;
+          },
+          currentSessionId() {
+            return 's1';
+          },
+        },
+        listTargets() {
+          return [{ id: 's1', title: '当前会话' }];
+        },
+        t,
+        usePanelInfo(selector) {
+          return selector({ activePanelId: 'deepseek-web-chat' });
+        },
+      },
+      reactStub,
+    );
+    const flat = JSON.stringify(panel);
+    assert.match(flat, /dsh-dsc-panel-quick/);
+    assert.match(flat, /dsh-dsc-quick-ask/);
+    assert.match(flat, /quick\.askPlaceholder/);
+    assert.match(flat, /quick\.askFill/);
+    assert.match(flat, /dsh-dsc-quick-resize/);
+    assert.match(flat, /quick\.resizeHint/);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test('reverse handoff offers a new-chat target', () => {
+  let stateIndex = 0;
+  const states = [];
+  Object.assign(reactStub, {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+      if (index === 0) states[index] = true; // opened
+      if (index === 3) states[index] = 'ready'; // phase
+      if (index === 13) states[index] = 'in'; // auth state
+      if (index === 19) states[index] = true; // reverse modal open
+      if (index === 32) states[index] = 'new'; // reverse target
+      return [states[index], () => {}];
+    },
+    useRef(value) {
+      return { current: value };
+    },
+    useEffect() {},
+    useLayoutEffect() {},
+    useCallback(fn) {
+      return fn;
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { ...previousWindow, innerWidth: 1200, innerHeight: 800 };
+  try {
+    const panel = ChatPanel(
+      {
+        back() {},
+        open() {},
+        delivery: {
+          deliver() {
+            return { ok: false, reason: 'no-session' };
+          },
+          restore() {
+            return false;
+          },
+          currentSessionId() {
+            return 's1';
+          },
+        },
+        listTargets() {
+          return [{ id: 's1', title: '当前会话' }];
+        },
+        t,
+        usePanelInfo(selector) {
+          return selector({ activePanelId: 'deepseek-web-chat' });
+        },
+      },
+      reactStub,
+    );
+    const flat = JSON.stringify(panel);
+    assert.match(flat, /reverse\.target/);
+    assert.match(flat, /reverse\.target\.new/);
+    assert.match(flat, /reverse\.newChatHint/);
+    assert.match(flat, /reverse\.newChatFill/);
+  } finally {
+    globalThis.window = previousWindow;
   }
 });

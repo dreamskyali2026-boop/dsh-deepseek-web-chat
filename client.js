@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '1.9.0';
+    const PLUGIN_VERSION = '2.0.0';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -49,6 +49,15 @@ window.__ModuleLoader__.load({
     const REVIEW_ROUTE = 'api/deepseek-web-chat.message';
     const REVIEW_TIMEOUT_MS = 8000;
     const REVIEW_PENDING_TTL_MS = 120000;
+    const QUICK_MIN_WIDTH = 320;
+    const QUICK_MIN_HEIGHT = 320;
+    const NEW_CHAT_FILL_ATTEMPTS = 12;
+    const NEW_CHAT_FILL_INTERVAL_MS = 500;
+    const UPDATE_KEY = 'dsh-deepseek-web-chat.update.v1';
+    const UPDATE_URL =
+      'https://raw.githubusercontent.com/dreamskyali2026-boop/dsh-deepseek-web-chat/main/package.json';
+    const UPDATE_TIMEOUT_MS = 8000;
+    const UPDATE_TTL_MS = 24 * 60 * 60 * 1000;
     const DEFAULT_SETTINGS = Object.freeze({
       defaultMode: 'all',
       defaultFormat: 'raw',
@@ -216,6 +225,210 @@ window.__ModuleLoader__.load({
 
     function saveSettings(settings) {
       return writeJson(SETTINGS_KEY, normalizeSettings(settings));
+    }
+
+    // --- Version and update check (D5) --------------------------------------
+    // The check reads this repository's package.json with a plain GET (no user
+    // data) and compares its SemVer with the bundled PLUGIN_VERSION. Results
+    // are cached locally so opening the panel does not poll GitHub.
+
+    function parseVersion(value) {
+      if (typeof value !== 'string') return null;
+      const text = value.trim();
+      if (text === '' || text.length > 64) return null;
+      const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(text);
+      if (match === null) return null;
+      const pre = match[4] === undefined ? [] : match[4].split('.');
+      return {
+        major: Number(match[1]),
+        minor: Number(match[2]),
+        patch: Number(match[3]),
+        pre,
+      };
+    }
+
+    /**
+     * Compare two SemVer strings, treating a release as newer than its own
+     * prerelease (`2.0.0 > 2.0.0-rc.1`).
+     * @returns -1, 0 or 1, or null when either value is not a version.
+     */
+    function compareVersions(left, right) {
+      const a = parseVersion(left);
+      const b = parseVersion(right);
+      if (a === null || b === null) return null;
+      for (const key of ['major', 'minor', 'patch']) {
+        if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1;
+      }
+      if (a.pre.length === 0 && b.pre.length === 0) return 0;
+      if (a.pre.length === 0) return 1;
+      if (b.pre.length === 0) return -1;
+      const length = Math.max(a.pre.length, b.pre.length);
+      for (let index = 0; index < length; index += 1) {
+        const x = a.pre[index];
+        const y = b.pre[index];
+        if (x === undefined) return -1;
+        if (y === undefined) return 1;
+        const numericX = /^\d+$/.test(x);
+        const numericY = /^\d+$/.test(y);
+        if (numericX && numericY) {
+          const diff = Number(x) - Number(y);
+          if (diff !== 0) return diff < 0 ? -1 : 1;
+        } else if (numericX !== numericY) {
+          return numericX ? -1 : 1;
+        } else if (x !== y) {
+          return x < y ? -1 : 1;
+        }
+      }
+      return 0;
+    }
+
+    /** @returns whether `latest` is strictly newer than `current`. */
+    function isNewerVersion(latest, current) {
+      const compared = compareVersions(latest, current);
+      return compared !== null && compared > 0;
+    }
+
+    function normalizeUpdateRecord(value) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+      const checkedAt = Number(value.checkedAt);
+      if (!Number.isFinite(checkedAt) || checkedAt <= 0) return null;
+      const version = typeof value.version === 'string' ? value.version.trim() : '';
+      const ok = value.ok === true && parseVersion(version) !== null;
+      return {
+        ok,
+        version: ok ? version : '',
+        checkedAt: Math.round(checkedAt),
+        error: ok ? '' : typeof value.error === 'string' ? value.error.slice(0, 80) : 'unavailable',
+      };
+    }
+
+    function loadUpdateRecord() {
+      return normalizeUpdateRecord(readJson(UPDATE_KEY, null));
+    }
+
+    function saveUpdateRecord(record) {
+      const normalized = normalizeUpdateRecord(record);
+      if (normalized === null) return false;
+      return writeJson(UPDATE_KEY, normalized);
+    }
+
+    let updateState = loadUpdateRecord();
+    const updateListeners = new Set();
+    const updateStore = {
+      getSnapshot: () => updateState,
+      subscribe(listener) {
+        updateListeners.add(listener);
+        return () => updateListeners.delete(listener);
+      },
+      set(record) {
+        updateState = normalizeUpdateRecord(record);
+        for (const listener of [...updateListeners]) {
+          try {
+            listener();
+          } catch (error) {
+            /* Update-badge listeners are best effort. */
+          }
+        }
+      },
+    };
+
+    /**
+     * @returns `unchecked` | `current` | `available` | `error`.
+     */
+    function updateStatusOf(record) {
+      if (record === null || record === undefined) return 'unchecked';
+      if (record.ok !== true) return 'error';
+      return isNewerVersion(record.version, PLUGIN_VERSION) ? 'available' : 'current';
+    }
+
+    /**
+     * Read the newest published version from the repository manifest.
+     * @param options - optional `{ fetch, url }` overrides for tests.
+     * @returns `{ ok: true, version }` or `{ ok: false, error }`.
+     */
+    async function fetchLatestVersion(options) {
+      const config = options !== null && typeof options === 'object' ? options : {};
+      const fetchImpl =
+        typeof config.fetch === 'function' ? config.fetch : typeof fetch === 'function' ? fetch : null;
+      if (fetchImpl === null) return { ok: false, error: 'no-fetch' };
+      const url = typeof config.url === 'string' && config.url !== '' ? config.url : UPDATE_URL;
+      const localSetTimeout =
+        typeof window !== 'undefined' && typeof window.setTimeout === 'function'
+          ? window.setTimeout
+          : globalThis.setTimeout;
+      const localClearTimeout =
+        typeof window !== 'undefined' && typeof window.clearTimeout === 'function'
+          ? window.clearTimeout
+          : globalThis.clearTimeout;
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      const timer = controller === null ? 0 : localSetTimeout(() => controller.abort(), UPDATE_TIMEOUT_MS);
+      try {
+        const response = await fetchImpl(url, {
+          cache: 'no-store',
+          ...(controller === null ? {} : { signal: controller.signal }),
+        });
+        if (response === null || response === undefined || response.ok !== true) {
+          return { ok: false, error: 'http' };
+        }
+        const body = await response.json();
+        const version = body !== null && typeof body === 'object' && typeof body.version === 'string'
+          ? body.version.trim()
+          : '';
+        if (parseVersion(version) === null) return { ok: false, error: 'invalid' };
+        return { ok: true, version };
+      } catch (error) {
+        return {
+          ok: false,
+          error: controller !== null && controller.signal.aborted ? 'timeout' : 'network',
+        };
+      } finally {
+        if (timer !== 0) localClearTimeout(timer);
+      }
+    }
+
+    /**
+     * Refresh the cached update record, reusing a fresh result unless `force`.
+     * A success is reused for a day; a failure retries after ten minutes.
+     * @param options - `{ force, fetch, url }`.
+     * @returns `unchecked` | `current` | `available` | `error`.
+     */
+    async function refreshUpdate(options) {
+      const config = options !== null && typeof options === 'object' ? options : {};
+      const now = Date.now();
+      const current = updateStore.getSnapshot();
+      if (current !== null && config.force !== true) {
+        const ttl = current.ok === true ? UPDATE_TTL_MS : 10 * 60 * 1000;
+        if (now - current.checkedAt < ttl) return updateStatusOf(current);
+      }
+      const result = await fetchLatestVersion(config);
+      const record = result.ok === true
+        ? { ok: true, version: result.version, checkedAt: now, error: '' }
+        : {
+            ok: false,
+            version: current !== null && current.ok === true ? current.version : '',
+            checkedAt: now,
+            error: result.error,
+          };
+      saveUpdateRecord(record);
+      updateStore.set(record);
+      track('dsc_update_check', { ok: result.ok === true, ...(result.ok === true ? { latest: result.version } : {}) });
+      return updateStatusOf(record);
+    }
+
+    /**
+     * One user-facing sentence describing the cached update state.
+     * @param record - stored update record, or null.
+     * @param t - translator bound to this plugin's namespace.
+     */
+    function updateStatusText(record, t) {
+      const status = updateStatusOf(record);
+      if (status === 'unchecked') return t('settings.updateUnchecked');
+      if (status === 'error') return t('settings.updateError');
+      const time = formatStamp(new Date(record.checkedAt));
+      if (status === 'available') return t('settings.updateAvailable', { version: record.version, time });
+      // A remote manifest older than the bundled build (a not-yet-pushed bump)
+      // still means the installed copy is the newest one here.
+      return t('settings.updateCurrent', { version: PLUGIN_VERSION, time });
     }
 
     // --- Remote selector fallback (R1) -------------------------------------
@@ -675,8 +888,18 @@ window.__ModuleLoader__.load({
       'quick.hint': '快速提问；按 Esc 关闭',
       'quick.drag': '按住标题栏拖动小窗；拖到屏幕右缘可分屏停靠；聚焦后可用方向键微调位置',
       'quick.snapHint': '松开停靠到右侧栏\n与 Harness 对话分屏',
+      'quick.askPlaceholder': '问 DeepSeek 一句…（Enter 填入）',
+      'quick.askFill': '填入',
+      'quick.askFillHint': '把这句话填进下面的 DeepSeek 输入框；不会自动发送',
+      'quick.askFilled': '已填入 DeepSeek 输入框，检查后按 Enter 发送',
+      'quick.askNotEmpty': 'DeepSeek 输入框已有内容，未覆盖',
+      'quick.askNotReady': 'DeepSeek 页面还没准备好，请稍后再试',
+      'quick.askFailed': '填入失败，请直接在下面的输入框里输入',
+      'quick.resize': '调整快速提问小窗大小',
+      'quick.resizeHint': '拖动右下角调整宽高；双击恢复默认大小；聚焦后可按方向键微调',
       'menu.history': '接力历史…',
       'menu.reverse': '把 Harness 上下文带到 DeepSeek…',
+      'menu.reverseNew': '带 Harness 上下文开新对话…',
       'menu.diagnostics': '页面诊断',
       'menu.settings': '设置…',
       'preview.format': '交接格式',
@@ -775,6 +998,14 @@ window.__ModuleLoader__.load({
       'reverse.noSelection': '（没有捕获到 Harness 选区）',
       'reverse.noSession': '（没有打开的 Harness 会话）',
       'reverse.failed': '填入失败，请先在 DeepSeek 页面登录并打开对话',
+      'reverse.target': '填入位置',
+      'reverse.target.current': '当前对话',
+      'reverse.target.new': '新对话',
+      'reverse.newChatHint': '会先打开一个新的 DeepSeek 对话，再把这段上下文填进输入框；不会自动发送。',
+      'reverse.newChatFill': '开新对话并填入',
+      'reverse.newChatOpening': '正在打开新的 DeepSeek 对话…',
+      'reverse.newChatFilled': '已在新对话中填入上下文，请检查后发送',
+      'reverse.newChatNotEmpty': '新对话的输入框已有内容，未覆盖；请先处理现有草稿',
       'settings.title': 'DeepSeek 聊天设置',
       'settings.nav': 'DeepSeek 网页聊天',
       'settings.pageHint': '从系统设置直接打开 DeepSeek 面板、快速提问或接力历史；其余偏好仍在面板内的设置里调整。',
@@ -785,7 +1016,6 @@ window.__ModuleLoader__.load({
       'settings.pageClearConfirm': '确认清空本地数据？',
       'settings.pageClearHint': '会清除接力历史、本地统计、草稿快照、快捷小窗位置和插件偏好；不会影响 DeepSeek 登录态。',
       'settings.pageCleared': '本地数据已清空',
-      'settings.pageVersion': '版本 {version}',
       'composer.latest': '最近接力 {time} · {count} 条',
       'composer.quick': '快速提问',
       'composer.hint': '打开 DeepSeek 面板',
@@ -828,6 +1058,15 @@ window.__ModuleLoader__.load({
       'settings.reset': '恢复默认设置',
       'settings.resetDone': '已恢复默认设置',
       'settings.saved': '设置已保存',
+      'settings.about': '关于与更新',
+      'settings.versionLine': 'DeepSeek 网页聊天 V{version}',
+      'settings.updateUnchecked': '尚未检查更新',
+      'settings.updateError': '检查更新失败，请稍后重试',
+      'settings.updateAvailable': '发现新版本 V{version} · {time} 检查',
+      'settings.updateCurrent': '已是最新版本 V{version} · {time} 检查',
+      'settings.updateCheck': '检查更新',
+      'settings.updateChecking': '正在检查…',
+      'settings.updateOpen': '查看发布页',
       'health.banner': '页面结构可能已改版，接力可能失败。',
       'health.detail': '已识别到登录状态，但没找到可写入的输入框或消息节点。',
       'health.copy': '复制诊断',
@@ -1024,8 +1263,18 @@ window.__ModuleLoader__.load({
       'quick.hint': 'Quick question; press Esc to close',
       'quick.drag': 'Drag the title bar to move this window; drop it on the right edge to dock and split; arrow keys nudge it when focused',
       'quick.snapHint': 'Release to dock to the right\nand split with Harness',
+      'quick.askPlaceholder': 'Ask DeepSeek something… (Enter to fill)',
+      'quick.askFill': 'Fill',
+      'quick.askFillHint': 'Fill this question into the DeepSeek composer below; nothing is sent automatically',
+      'quick.askFilled': 'Filled the DeepSeek composer. Press Enter there to send.',
+      'quick.askNotEmpty': 'The DeepSeek composer already has content; it was not overwritten.',
+      'quick.askNotReady': 'The DeepSeek page is not ready yet. Try again in a moment.',
+      'quick.askFailed': 'Could not fill the composer. Type directly in the field below.',
+      'quick.resize': 'Resize the quick-ask window',
+      'quick.resizeHint': 'Drag the bottom-right corner to resize; double-click to reset; arrow keys resize when focused',
       'menu.history': 'Handoff history…',
       'menu.reverse': 'Bring Harness context to DeepSeek…',
+      'menu.reverseNew': 'Open a new chat with Harness context…',
       'menu.diagnostics': 'Page diagnostics',
       'menu.settings': 'Settings…',
       'preview.format': 'Format',
@@ -1124,6 +1373,14 @@ window.__ModuleLoader__.load({
       'reverse.noSelection': '(no Harness selection captured)',
       'reverse.noSession': '(no open Harness conversation)',
       'reverse.failed': 'Could not fill the composer. Sign in and open a DeepSeek conversation first.',
+      'reverse.target': 'Fill into',
+      'reverse.target.current': 'Current chat',
+      'reverse.target.new': 'New chat',
+      'reverse.newChatHint': 'Opens a fresh DeepSeek conversation first, then fills this context into it; nothing is sent automatically.',
+      'reverse.newChatFill': 'New chat & fill',
+      'reverse.newChatOpening': 'Opening a new DeepSeek conversation…',
+      'reverse.newChatFilled': 'Filled the context into the new chat. Review it before sending.',
+      'reverse.newChatNotEmpty': 'The new chat already has composer content; it was not overwritten.',
       'settings.title': 'DeepSeek Chat settings',
       'settings.nav': 'DeepSeek Web Chat',
       'settings.pageHint': 'Open the DeepSeek panel, ask a quick question, or browse handoff history from Settings. Other preferences stay in the panel.',
@@ -1134,7 +1391,6 @@ window.__ModuleLoader__.load({
       'settings.pageClearConfirm': 'Confirm clearing local data?',
       'settings.pageClearHint': 'Clears handoff history, local counters, draft snapshots, quick-window position and plugin preferences. DeepSeek sign-in is not affected.',
       'settings.pageCleared': 'Local data cleared',
-      'settings.pageVersion': 'Version {version}',
       'composer.latest': 'Last handoff {time} · {count} msg',
       'composer.quick': 'Quick ask',
       'composer.hint': 'Open the DeepSeek panel',
@@ -1177,6 +1433,15 @@ window.__ModuleLoader__.load({
       'settings.reset': 'Reset to defaults',
       'settings.resetDone': 'Settings reset to defaults',
       'settings.saved': 'Settings saved',
+      'settings.about': 'About & updates',
+      'settings.versionLine': 'DeepSeek Web Chat V{version}',
+      'settings.updateUnchecked': 'Updates have not been checked yet',
+      'settings.updateError': 'Could not check for updates. Try again later.',
+      'settings.updateAvailable': 'New version V{version} available · checked {time}',
+      'settings.updateCurrent': 'Up to date at V{version} · checked {time}',
+      'settings.updateCheck': 'Check for updates',
+      'settings.updateChecking': 'Checking…',
+      'settings.updateOpen': 'View releases',
       'health.banner': 'The page structure may have changed; handoff could fail.',
       'health.detail': 'You appear to be signed in, but no writable composer or message nodes were found.',
       'health.copy': 'Copy diagnostics',
@@ -1287,6 +1552,82 @@ window.__ModuleLoader__.load({
 }
 .dsh-dsc-panel-quick .dsh-dsc-title {
   max-width: 170px;
+}
+.dsh-dsc-quick-ask {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+  background: var(--dsw-alias-bg-base);
+}
+.dsh-dsc-quick-ask-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12.5px;
+}
+.dsh-dsc-quick-ask-input:focus {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);
+}
+.dsh-dsc-quick-ask-fill {
+  flex: none;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--dsw-alias-state-business-primary);
+  color: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.dsh-dsc-quick-ask-fill:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.dsh-dsc-quick-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 16px;
+  height: 16px;
+  z-index: 40;
+  cursor: nwse-resize;
+  touch-action: none;
+  border-radius: 4px;
+  background:
+    linear-gradient(135deg, transparent 45%, var(--dsw-alias-border-l2) 46%, var(--dsw-alias-border-l2) 56%, transparent 57%),
+    linear-gradient(135deg, transparent 68%, var(--dsw-alias-border-l2) 69%, var(--dsw-alias-border-l2) 79%, transparent 80%);
+}
+.dsh-dsc-quick-resize:hover,
+.dsh-dsc-quick-resize-active {
+  background:
+    linear-gradient(135deg, transparent 45%, var(--dsw-alias-state-business-primary) 46%, var(--dsw-alias-state-business-primary) 56%, transparent 57%),
+    linear-gradient(135deg, transparent 68%, var(--dsw-alias-state-business-primary) 69%, var(--dsw-alias-state-business-primary) 79%, transparent 80%);
+}
+.dsh-dsc-quick-resize:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+.dsh-dsc-resizing {
+  user-select: none;
+}
+.dsh-dsc-resizing .dsh-dsc-webview {
+  pointer-events: none;
+}
+.dsh-dsc-reverse-hint {
+  margin: 4px 0 8px;
 }
 .dsh-dsc-bar-draggable {
   cursor: grab;
@@ -2204,7 +2545,6 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dsc-settings-copy { margin: 0; color: var(--dsw-alias-label-secondary); }
 .dsh-dsc-settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dsh-dsc-settings-note { color: var(--dsw-alias-label-tertiary); font-size: 11.5px; }
-.dsh-dsc-settings-version { margin: 12px 0 0; color: var(--dsw-alias-label-tertiary); font-size: 11px; }
 .dsh-dsc-button.dsh-dsc-danger { color: #e5484d; border-color: color-mix(in srgb, #e5484d 45%, transparent); }
 .dsh-dsc-modal-settings {
   width: min(580px, 100%);
@@ -2623,7 +2963,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
     function restoreQuickRect(base, saved, viewport) {
       if (saved === null || typeof saved !== 'object') return base;
       if (!Number.isFinite(Number(saved.left)) || !Number.isFinite(Number(saved.top))) return base;
-      return clampQuickRect({ ...base, left: Number(saved.left), top: Number(saved.top) }, viewport);
+      const width = Number(saved.width);
+      const height = Number(saved.height);
+      return clampQuickRect(
+        {
+          ...base,
+          left: Number(saved.left),
+          top: Number(saved.top),
+          ...(Number.isFinite(width) && width > 0 ? { width } : {}),
+          ...(Number.isFinite(height) && height > 0 ? { height } : {}),
+        },
+        viewport,
+      );
     }
 
     function loadQuickRect() {
@@ -2632,15 +2983,29 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const left = Number(raw.left);
       const top = Number(raw.top);
       if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
-      return { left, top };
+      const width = Number(raw.width);
+      const height = Number(raw.height);
+      return {
+        left,
+        top,
+        ...(Number.isFinite(width) && width > 0 ? { width } : {}),
+        ...(Number.isFinite(height) && height > 0 ? { height } : {}),
+      };
     }
 
-    function saveQuickRect(position) {
-      if (position === null || typeof position !== 'object') return false;
-      const left = Number(position.left);
-      const top = Number(position.top);
+    function saveQuickRect(rect) {
+      if (rect === null || typeof rect !== 'object') return false;
+      const left = Number(rect.left);
+      const top = Number(rect.top);
       if (!Number.isFinite(left) || !Number.isFinite(top)) return false;
-      return writeJson(QUICK_RECT_KEY, { left: Math.round(left), top: Math.round(top) });
+      const width = Number(rect.width);
+      const height = Number(rect.height);
+      return writeJson(QUICK_RECT_KEY, {
+        left: Math.round(left),
+        top: Math.round(top),
+        ...(Number.isFinite(width) && width > 0 ? { width: Math.round(width) } : {}),
+        ...(Number.isFinite(height) && height > 0 ? { height: Math.round(height) } : {}),
+      });
     }
 
     // Dragging within this distance of the right viewport edge arms the
@@ -3920,6 +4285,67 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return commandPrefix + wrapped;
     }
 
+    /**
+     * Compose the context block the reverse handoff fills into DeepSeek.
+     * @param target - current Harness conversation target, if any.
+     * @param selection - last captured Harness selection.
+     * @param t - translator bound to this plugin's namespace.
+     */
+    function buildReverseContext(target, selection, t) {
+      const row = target !== null && typeof target === 'object' ? target : {};
+      const title = typeof row.title === 'string' ? row.title.trim() : '';
+      const cwd = typeof row.cwd === 'string' ? row.cwd.trim() : '';
+      const picked = typeof selection === 'string' ? selection.trim() : '';
+      const parts = [
+        t('reverse.desc'),
+        '',
+        '### ' + t('reverse.session'),
+        title === '' ? t('reverse.noSession') : title,
+        '',
+        '### ' + t('reverse.workspace'),
+        cwd === '' ? t('reverse.noWorkspace') : cwd,
+        '',
+        '### ' + t('reverse.selection'),
+        picked === '' ? t('reverse.noSelection') : picked,
+      ];
+      return parts.join('\n');
+    }
+
+    /**
+     * Fill the guest composer, retrying while a freshly opened conversation
+     * mounts its editor. `not-empty` stops early: overwriting a draft is never
+     * acceptable, and retrying would not change the answer.
+     * @param view - guest view with `executeJavaScript`.
+     * @param text - composer text.
+     * @param options - optional `{ attempts, intervalMs, sleep }` for tests.
+     */
+    async function fillComposerWithRetry(view, text, options) {
+      const config = options !== null && typeof options === 'object' ? options : {};
+      const attempts =
+        Number.isInteger(config.attempts) && config.attempts > 0 ? config.attempts : NEW_CHAT_FILL_ATTEMPTS;
+      const intervalMs = Number.isFinite(config.intervalMs) ? config.intervalMs : NEW_CHAT_FILL_INTERVAL_MS;
+      const sleep =
+        typeof config.sleep === 'function'
+          ? config.sleep
+          : (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+      if (view === null || view === undefined || typeof view.executeJavaScript !== 'function') {
+        return { ok: false, reason: 'unsupported' };
+      }
+      const source = '(' + fillComposerInGuest.toString() + ')(' + JSON.stringify(String(text || '')) + ', false)';
+      let last = { ok: false, reason: 'no-composer' };
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        try {
+          const result = await view.executeJavaScript(source, true);
+          last = result !== null && typeof result === 'object' ? result : last;
+        } catch (error) {
+          last = { ok: false, reason: 'unsupported' };
+        }
+        if (last.ok === true || last.reason === 'not-empty') return last;
+        if (attempt < attempts - 1) await sleep(intervalMs);
+      }
+      return last;
+    }
+
     async function copyText(text) {
       try {
         if (navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === 'function') {
@@ -4954,9 +5380,20 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [quickSnapZone, setQuickSnapZone] = React.useState(false);
       const quickRectRef = React.useRef(null);
       const quickDragRef = React.useRef(null);
+      const quickResizeRef = React.useRef(null);
+      const quickAskRef = React.useRef(null);
+      const pendingNewChatRef = React.useRef(null);
+      const updateLastCheckRef = React.useRef(0);
+      const updateRecord = React.useSyncExternalStore(updateStore.subscribe, updateStore.getSnapshot);
       const [historyQuery, setHistoryQuery] = React.useState('');
       const [menuPosition, setMenuPosition] = React.useState(null);
       const [draftOffer, setDraftOffer] = React.useState(() => loadDraft());
+      // Added in V2.0 after the existing state slots so render-order tooling and
+      // unit tests that address slots by index keep working.
+      const [reverseMode, setReverseMode] = React.useState('current');
+      const [quickResizing, setQuickResizing] = React.useState(false);
+      const [quickAsk, setQuickAsk] = React.useState('');
+      const [updateChecking, setUpdateChecking] = React.useState(false);
       const dockDragRef = React.useRef(null);
       const hostRef = React.useRef(null);
       const panelRootRef = React.useRef(null);
@@ -5413,6 +5850,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         }
       }, []);
 
+      const openReleases = React.useCallback(() => {
+        try {
+          window.open(REPO_URL + '/releases', '_blank', 'noopener,noreferrer');
+        } catch (cause) {
+          console.warn('DeepSeek chat: could not open the releases page', cause);
+        }
+      }, []);
+
       const dismissOnboarding = React.useCallback(() => {
         rememberOnboarding();
         setOnboarding(false);
@@ -5592,7 +6037,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           }
         }
         const restored = clampQuickRect(
-          { ...quickGeometry(), left: drag.startLeft, top: drag.startTop },
+          drag.startRect === undefined
+            ? { ...quickGeometry(), left: drag.startLeft, top: drag.startTop }
+            : drag.startRect,
           { width: window.innerWidth, height: window.innerHeight },
         );
         quickRectRef.current = restored;
@@ -5614,7 +6061,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             target !== null &&
             target !== undefined &&
             typeof target.closest === 'function' &&
-            target.closest('button, .dsh-dsc-handoff, .dsh-dsc-auth') !== null
+            target.closest('button, .dsh-dsc-handoff, .dsh-dsc-auth, input, .dsh-dsc-quick-resize') !== null
           ) {
             return;
           }
@@ -5627,6 +6074,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             startY: event.clientY,
             startLeft: current.left,
             startTop: current.top,
+            startRect: current,
             pointerId: event.pointerId,
             element: event.currentTarget,
             zone: false,
@@ -5645,9 +6093,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const moveQuickDrag = React.useCallback((event) => {
         const drag = quickDragRef.current;
         if (drag === null) return;
+        const start = drag.startRect === undefined ? quickGeometry() : drag.startRect;
         const next = clampQuickRect(
           {
-            ...quickGeometry(),
+            ...start,
             left: drag.startLeft + (event.clientX - drag.startX),
             top: drag.startTop + (event.clientY - drag.startY),
           },
@@ -5703,6 +6152,133 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               ...current,
               left: current.left + (vertical ? 0 : delta),
               top: current.top + (vertical ? delta : 0),
+            },
+            { width: window.innerWidth, height: window.innerHeight },
+          );
+          event.preventDefault();
+          quickRectRef.current = next;
+          setQuickRect(next);
+          saveQuickRect(next);
+        },
+        [],
+      );
+
+      const cancelQuickResize = React.useCallback(() => {
+        const drag = quickResizeRef.current;
+        if (drag === null) return;
+        quickResizeRef.current = null;
+        setQuickResizing(false);
+        if (drag.element !== null && drag.element !== undefined && typeof drag.element.releasePointerCapture === 'function') {
+          try {
+            drag.element.releasePointerCapture(drag.pointerId);
+          } catch (error) {
+            /* Releasing pointer capture is best effort. */
+          }
+        }
+        const restored = clampQuickRect(
+          { left: drag.left, top: drag.top, width: drag.startWidth, height: drag.startHeight },
+          { width: window.innerWidth, height: window.innerHeight },
+        );
+        quickRectRef.current = restored;
+        setQuickRect(restored);
+      }, []);
+
+      const startQuickResize = React.useCallback((event) => {
+        if (!quickRef.current || event.button !== 0) return;
+        const current =
+          quickRectRef.current === null || quickRectRef.current === undefined
+            ? quickGeometry()
+            : quickRectRef.current;
+        quickResizeRef.current = {
+          startX: event.clientX,
+          startY: event.clientY,
+          startWidth: current.width,
+          startHeight: current.height,
+          left: current.left,
+          top: current.top,
+          pointerId: event.pointerId,
+          element: event.currentTarget,
+        };
+        setQuickResizing(true);
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch (error) {
+          /* Pointer capture is best effort. */
+        }
+        event.preventDefault();
+        event.stopPropagation();
+      }, []);
+
+      const moveQuickResize = React.useCallback((event) => {
+        const drag = quickResizeRef.current;
+        if (drag === null) return;
+        const maxWidth = Math.max(QUICK_MIN_WIDTH, window.innerWidth - drag.left - 8);
+        const maxHeight = Math.max(QUICK_MIN_HEIGHT, window.innerHeight - drag.top - 8);
+        const width = Math.min(
+          Math.max(Math.round(drag.startWidth + (event.clientX - drag.startX)), QUICK_MIN_WIDTH),
+          maxWidth,
+        );
+        const height = Math.min(
+          Math.max(Math.round(drag.startHeight + (event.clientY - drag.startY)), QUICK_MIN_HEIGHT),
+          maxHeight,
+        );
+        const next = clampQuickRect(
+          { left: drag.left, top: drag.top, width, height },
+          { width: window.innerWidth, height: window.innerHeight },
+        );
+        quickRectRef.current = next;
+        setQuickRect(next);
+        event.preventDefault();
+      }, []);
+
+      const endQuickResize = React.useCallback((event) => {
+        const drag = quickResizeRef.current;
+        if (drag === null) return;
+        quickResizeRef.current = null;
+        setQuickResizing(false);
+        try {
+          event.currentTarget.releasePointerCapture(drag.pointerId);
+        } catch (error) {
+          /* Releasing pointer capture is best effort. */
+        }
+        const current = quickRectRef.current;
+        if (current !== null && current !== undefined) {
+          saveQuickRect(current);
+          track('dsc_quick_resize', { width: current.width, height: current.height });
+        }
+      }, []);
+
+      const resetQuickSize = React.useCallback(() => {
+        const current =
+          quickRectRef.current === null || quickRectRef.current === undefined
+            ? quickGeometry()
+            : quickRectRef.current;
+        const base = quickGeometry();
+        const next = clampQuickRect(
+          { ...current, width: base.width, height: base.height },
+          { width: window.innerWidth, height: window.innerHeight },
+        );
+        quickRectRef.current = next;
+        setQuickRect(next);
+        saveQuickRect(next);
+      }, []);
+
+      const keyQuickResize = React.useCallback(
+        (event) => {
+          if (!quickRef.current) return;
+          const horizontal = event.key === 'ArrowLeft' || event.key === 'ArrowRight';
+          const vertical = event.key === 'ArrowUp' || event.key === 'ArrowDown';
+          if (!horizontal && !vertical) return;
+          const delta = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -20 : 20;
+          const current =
+            quickRectRef.current === null || quickRectRef.current === undefined
+              ? quickGeometry()
+              : quickRectRef.current;
+          const next = clampQuickRect(
+            {
+              ...current,
+              width: Math.max(QUICK_MIN_WIDTH, current.width + (horizontal ? delta : 0)),
+              height: Math.max(QUICK_MIN_HEIGHT, current.height + (vertical ? delta : 0)),
             },
             { width: window.innerWidth, height: window.innerHeight },
           );
@@ -6076,6 +6652,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             // Esc during a drag cancels the drag and restores the position
             // instead of closing layers underneath it.
             cancelQuickDrag();
+            return;
+          }
+          if (quickResizeRef.current !== null) {
+            // Same for a size drag: Esc restores the previous rectangle.
+            cancelQuickResize();
             return;
           }
           if (menuOpen) {
@@ -6623,6 +7204,52 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         void runHandoffRef.current?.('all');
       }, [visible, phase]);
 
+      React.useEffect(() => {
+        if (phase === 'error' || phase === 'unsupported') {
+          if (pendingNewChatRef.current === null) return undefined;
+          pendingNewChatRef.current = null;
+          showToast(t('reverse.failed'));
+          return undefined;
+        }
+        if (phase !== 'ready' || pendingNewChatRef.current === null) return undefined;
+        const text = pendingNewChatRef.current;
+        pendingNewChatRef.current = null;
+        let cancelled = false;
+        void fillComposerWithRetry(viewRef.current, text).then((result) => {
+          if (cancelled) return;
+          const ok = result !== null && result !== undefined && result.ok === true;
+          const empty = result !== null && result !== undefined && result.reason === 'not-empty';
+          showToast(t(ok ? 'reverse.newChatFilled' : empty ? 'reverse.newChatNotEmpty' : 'reverse.failed'));
+          track(
+            'dsc_reverse',
+            ok ? { ok: true, mode: 'new-chat-filled' } : { ok: false, mode: 'new-chat' },
+          );
+        });
+        return () => {
+          cancelled = true;
+        };
+      }, [phase, showToast, t]);
+
+      React.useEffect(() => {
+        if (!quick) return undefined;
+        const timer = window.setTimeout(() => {
+          const input = quickAskRef.current;
+          if (input !== null && input !== undefined && typeof input.focus === 'function') input.focus();
+        }, 80);
+        return () => window.clearTimeout(timer);
+      }, [quick]);
+
+      React.useEffect(() => {
+        if (!visible || phase !== 'ready') return undefined;
+        const now = Date.now();
+        if (now - updateLastCheckRef.current < 60 * 1000) return undefined;
+        updateLastCheckRef.current = now;
+        const record = updateStore.getSnapshot();
+        if (record !== null && record.ok === true && now - record.checkedAt < UPDATE_TTL_MS) return undefined;
+        void refreshUpdate({ force: false });
+        return undefined;
+      }, [visible, phase]);
+
       const toggleMessage = React.useCallback((index) => {
         setPreview((current) => {
           if (current === null) return current;
@@ -6826,56 +7453,134 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         setMenuOpen(false);
       }, []);
 
-      const openReverse = React.useCallback(() => {
-        setMenuOpen(false);
-        const targets = typeof listTargets === 'function' ? listTargets() : [];
-        let current;
-        try {
-          current = delivery !== null && delivery !== undefined ? delivery.currentSessionId() : undefined;
-        } catch (error) {
-          current = undefined;
-        }
-        const target = targets.find((row) => row.id === current) || targets[0];
-        const title = target === undefined ? '' : target.title;
-        const cwd = target === undefined || typeof target.cwd !== 'string' ? '' : target.cwd;
-        const selection = lastSelectionRef.current.trim();
-        const parts = [
-          t('reverse.desc'),
-          '',
-          '### ' + t('reverse.session'),
-          title === '' ? t('reverse.noSession') : title,
-          '',
-          '### ' + t('reverse.workspace'),
-          cwd === '' ? t('reverse.noWorkspace') : cwd,
-          '',
-          '### ' + t('reverse.selection'),
-          selection === '' ? t('reverse.noSelection') : selection,
-        ];
-        setReverseText(parts.join('\n'));
-        setReverseOpen(true);
-      }, [delivery, listTargets, t]);
+      const openReverse = React.useCallback(
+        (mode) => {
+          setMenuOpen(false);
+          const targets = typeof listTargets === 'function' ? listTargets() : [];
+          let current;
+          try {
+            current = delivery !== null && delivery !== undefined ? delivery.currentSessionId() : undefined;
+          } catch (error) {
+            current = undefined;
+          }
+          const target = targets.find((row) => row.id === current) || targets[0];
+          setReverseText(buildReverseContext(target, lastSelectionRef.current, t));
+          setReverseMode(mode === 'new' ? 'new' : 'current');
+          setReverseOpen(true);
+        },
+        [delivery, listTargets, t],
+      );
 
-      const fillReverse = React.useCallback(async () => {
+      const startNewChat = React.useCallback(() => {
         const view = viewRef.current;
-        if (phase !== 'ready' || view === null || typeof view.executeJavaScript !== 'function') {
+        if (phase !== 'ready' || view === null || typeof view.loadURL !== 'function') {
           showToast(t('reverse.failed'));
           return;
         }
+        if (authState === 'out') {
+          showToast(t('review.signIn'));
+          return;
+        }
+        const text = reverseText.trim();
+        if (text === '') {
+          showToast(t('preview.emptyText'));
+          return;
+        }
+        pendingNewChatRef.current = text;
+        setReverseOpen(false);
+        setAuthState('unknown');
+        setPhase('loading');
         try {
-          const source = '(' + fillComposerInGuest.toString() + ')(' + JSON.stringify(reverseText) + ')';
+          const loading = view.loadURL(TARGET);
+          if (loading !== undefined && typeof loading.catch === 'function') {
+            loading.catch((cause) => {
+              if (cause !== null && typeof cause === 'object' && cause.code === 'ERR_ABORTED') return;
+              if (String(cause).includes('ERR_ABORTED')) return;
+              // The document may already be ready and filled; only report a
+              // failure while the fill is still pending.
+              if (pendingNewChatRef.current === null) return;
+              pendingNewChatRef.current = null;
+              showToast(t('reverse.failed'));
+            });
+          }
+        } catch (error) {
+          pendingNewChatRef.current = null;
+          setPhase('ready');
+          showToast(t('reverse.failed'));
+          return;
+        }
+        track('dsc_reverse', { ok: true, mode: 'new-chat' });
+        showToast(t('reverse.newChatOpening'));
+      }, [authState, phase, reverseText, showToast, t]);
+
+      const fillReverse = React.useCallback(
+        async (mode) => {
+          if (mode === 'new') {
+            startNewChat();
+            return;
+          }
+          const view = viewRef.current;
+          if (phase !== 'ready' || view === null || typeof view.executeJavaScript !== 'function') {
+            showToast(t('reverse.failed'));
+            return;
+          }
+          try {
+            const source = '(' + fillComposerInGuest.toString() + ')(' + JSON.stringify(reverseText) + ')';
+            const result = await view.executeJavaScript(source, true);
+            if (result !== null && result !== undefined && result.ok === true) {
+              setReverseOpen(false);
+              showToast(t('reverse.filled'));
+              track('dsc_reverse', { ok: true });
+              return;
+            }
+          } catch (error) {
+            console.warn('DeepSeek chat: reverse handoff failed', error);
+          }
+          track('dsc_error', {});
+          showToast(t('reverse.failed'));
+        },
+        [phase, reverseText, showToast, startNewChat, t],
+      );
+
+      const submitQuickAsk = React.useCallback(async () => {
+        const text = quickAsk.trim();
+        if (text === '') return;
+        const view = viewRef.current;
+        if (phase !== 'ready' || view === null || typeof view.executeJavaScript !== 'function') {
+          showToast(t('quick.askNotReady'));
+          return;
+        }
+        if (authState === 'out') {
+          showToast(t('review.signIn'));
+          return;
+        }
+        try {
+          const source = '(' + fillComposerInGuest.toString() + ')(' + JSON.stringify(text) + ', false)';
           const result = await view.executeJavaScript(source, true);
           if (result !== null && result !== undefined && result.ok === true) {
-            setReverseOpen(false);
-            showToast(t('reverse.filled'));
-            track('dsc_reverse', { ok: true });
+            setQuickAsk('');
+            showToast(t('quick.askFilled'));
+            track('dsc_quick_ask', { chars: text.length });
+            return;
+          }
+          if (result !== null && result !== undefined && result.reason === 'not-empty') {
+            showToast(t('quick.askNotEmpty'));
             return;
           }
         } catch (error) {
-          console.warn('DeepSeek chat: reverse handoff failed', error);
+          console.warn('DeepSeek chat: quick ask fill failed', error);
         }
-        track('dsc_error', {});
-        showToast(t('reverse.failed'));
-      }, [phase, reverseText, showToast, t]);
+        showToast(t('quick.askFailed'));
+      }, [authState, phase, quickAsk, showToast, t]);
+
+      const checkUpdate = React.useCallback(async (force) => {
+        setUpdateChecking(true);
+        try {
+          await refreshUpdate({ force: force === true });
+        } finally {
+          setUpdateChecking(false);
+        }
+      }, []);
 
       const runDiagnostics = React.useCallback(async () => {
         setMenuOpen(false);
@@ -7845,6 +8550,30 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                   undo: metric('dsc_undo'),
                 }),
               ),
+              h('h3', { className: 'dsh-dsc-subheading' }, t('settings.about')),
+              h('p', { className: 'dsh-dsc-text' }, t('settings.versionLine', { version: PLUGIN_VERSION })),
+              h('p', { className: 'dsh-dsc-text' }, updateStatusText(updateRecord, t)),
+              h(
+                'div',
+                { className: 'dsh-dsc-footer-actions' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-button',
+                    disabled: updateChecking,
+                    onClick: () => void checkUpdate(true),
+                  },
+                  updateChecking ? t('settings.updateChecking') : t('settings.updateCheck'),
+                ),
+                updateStatusOf(updateRecord) === 'available'
+                  ? h(
+                      'button',
+                      { type: 'button', className: 'dsh-dsc-button dsh-dsc-primary', onClick: openReleases },
+                      t('settings.updateOpen'),
+                    )
+                  : null,
+              ),
               h(
                 'div',
                 { className: 'dsh-dsc-footer-actions' },
@@ -8031,6 +8760,36 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               h(
                 'div',
                 { className: 'dsh-dsc-preview-line' },
+                h('span', null, t('reverse.target')),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-chip',
+                    'data-active': reverseMode !== 'new',
+                    'aria-pressed': reverseMode !== 'new',
+                    onClick: () => setReverseMode('current'),
+                  },
+                  t('reverse.target.current'),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-chip',
+                    'data-active': reverseMode === 'new',
+                    'aria-pressed': reverseMode === 'new',
+                    onClick: () => setReverseMode('new'),
+                  },
+                  t('reverse.target.new'),
+                ),
+              ),
+              reverseMode === 'new'
+                ? h('p', { className: 'dsh-dsc-text dsh-dsc-reverse-hint' }, t('reverse.newChatHint'))
+                : null,
+              h(
+                'div',
+                { className: 'dsh-dsc-preview-line' },
                 h('span', null, t('scenario.title')),
                 SCENARIO_TEMPLATES.map((id) =>
                   h(
@@ -8062,9 +8821,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     type: 'button',
                     className: 'dsh-dsc-button dsh-dsc-primary',
                     disabled: phase !== 'ready' || reverseText.trim() === '',
-                    onClick: () => void fillReverse(),
+                    onClick: () => void fillReverse(reverseMode),
                   },
-                  t('reverse.fill'),
+                  reverseMode === 'new' ? t('reverse.newChatFill') : t('reverse.fill'),
                 ),
               ),
             ),
@@ -8169,6 +8928,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               (docked ? ' dsh-dsc-panel-docked' : '') +
               (embedded ? ' dsh-dsc-panel-embedded' : '') +
               (quick ? ' dsh-dsc-panel-quick' : '') +
+              (quickResizing ? ' dsh-dsc-resizing' : '') +
               (quickDragging ? ' dsh-dsc-dragging' : ''),
             style: panelStyle,
             'aria-label': t('window.label'),
@@ -8275,9 +9035,25 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                     ),
                     h(
                       'button',
-                      { type: 'button', role: 'menuitem', className: 'dsh-dsc-menu-item', onClick: openReverse },
+                      {
+                        type: 'button',
+                        role: 'menuitem',
+                        className: 'dsh-dsc-menu-item',
+                        onClick: () => openReverse('current'),
+                      },
                       h('span', { className: 'dsh-dsc-menu-check' }, h(HandoffGlyph, { size: 13 })),
                       h('span', null, t('menu.reverse')),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        role: 'menuitem',
+                        className: 'dsh-dsc-menu-item',
+                        onClick: () => openReverse('new'),
+                      },
+                      h('span', { className: 'dsh-dsc-menu-check' }, h(ChatGlyph, { size: 13 })),
+                      h('span', null, t('menu.reverseNew')),
                     ),
                     h(
                       'button',
@@ -8312,6 +9088,62 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             h(IconButton, { label: t('reload'), onClick: reload }, h(ReloadGlyph, { size: 15 })),
             h(IconButton, { label: t('openExternal'), onClick: openExternal }, h(ExternalGlyph, { size: 15 })),
           ),
+          quick
+            ? h(
+                'div',
+                { className: 'dsh-dsc-quick-ask' },
+                h('input', {
+                  ref: quickAskRef,
+                  className: 'dsh-dsc-quick-ask-input',
+                  type: 'text',
+                  value: quickAsk,
+                  spellCheck: false,
+                  placeholder: t('quick.askPlaceholder'),
+                  'aria-label': t('quick.askPlaceholder'),
+                  onChange: (event) => setQuickAsk(event.target.value),
+                  onKeyDown: (event) => {
+                    const composing =
+                      event.nativeEvent !== undefined &&
+                      event.nativeEvent !== null &&
+                      event.nativeEvent.isComposing === true;
+                    if (event.key !== 'Enter' || event.shiftKey || composing) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void submitQuickAsk();
+                  },
+                }),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-dsc-quick-ask-fill',
+                    disabled: phase !== 'ready' || quickAsk.trim() === '',
+                    title: t('quick.askFillHint'),
+                    onClick: () => void submitQuickAsk(),
+                  },
+                  t('quick.askFill'),
+                ),
+              )
+            : null,
+          quick
+            ? h('div', {
+                className: 'dsh-dsc-quick-resize' + (quickResizing ? ' dsh-dsc-quick-resize-active' : ''),
+                role: 'separator',
+                'aria-orientation': 'vertical',
+                'aria-label': t('quick.resize'),
+                'aria-valuemin': QUICK_MIN_WIDTH,
+                'aria-valuemax': Math.max(QUICK_MIN_WIDTH, window.innerWidth - 16),
+                'aria-valuenow': geometry === null ? 0 : Math.round(geometry.width),
+                tabIndex: 0,
+                title: t('quick.resizeHint'),
+                onPointerDown: startQuickResize,
+                onPointerMove: moveQuickResize,
+                onPointerUp: endQuickResize,
+                onPointerCancel: endQuickResize,
+                onDoubleClick: resetQuickSize,
+                onKeyDown: keyQuickResize,
+              })
+            : null,
           docked && !embedded && !quick
             ? h('div', {
                 className: 'dsh-dsc-resize' + (dockDragging ? ' dsh-dsc-resize-active' : ''),
@@ -8538,6 +9370,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
     function SettingsSection({ t, openPanel, openQuick, openHistory, close }) {
       const [confirmClear, setConfirmClear] = React.useState(false);
       const [cleared, setCleared] = React.useState(false);
+      const [updateChecking, setUpdateChecking] = React.useState(false);
+      const [updateRecord, setUpdateRecord] = React.useState(() => loadUpdateRecord());
       const metrics = loadMetrics();
       const count = (key) => Number(metrics.counts[key]) || 0;
       const leave = () => {
@@ -8548,7 +9382,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         leave();
       };
       const clearLocal = () => {
-        for (const key of [SETTINGS_KEY, HISTORY_KEY, METRICS_KEY, DRAFT_KEY, QUICK_RECT_KEY]) {
+        for (const key of [SETTINGS_KEY, HISTORY_KEY, METRICS_KEY, DRAFT_KEY, QUICK_RECT_KEY, UPDATE_KEY]) {
           try {
             window.localStorage.removeItem(key);
           } catch (error) {
@@ -8556,6 +9390,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           }
         }
         historyStore.set([]);
+        updateStore.set(null);
+        setUpdateRecord(null);
         try {
           window.dispatchEvent(new CustomEvent('dsh-deepseek-web-chat:reset'));
         } catch (error) {
@@ -8624,7 +9460,48 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               ),
           cleared ? h('span', { className: 'dsh-dsc-settings-note' }, t('settings.pageCleared')) : null,
         ),
-        h('p', { className: 'dsh-dsc-settings-version' }, t('settings.pageVersion', { version: PLUGIN_VERSION })),
+        h('h3', { className: 'dsh-dsc-settings-subtitle' }, t('settings.about')),
+        h('p', { className: 'dsh-dsc-settings-copy' }, t('settings.versionLine', { version: PLUGIN_VERSION })),
+        h('p', { className: 'dsh-dsc-settings-copy' }, updateStatusText(updateRecord, t)),
+        h(
+          'div',
+          { className: 'dsh-dsc-settings-actions' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-dsc-button',
+              disabled: updateChecking,
+              onClick: async () => {
+                setUpdateChecking(true);
+                try {
+                  await refreshUpdate({ force: true });
+                  setUpdateRecord(loadUpdateRecord());
+                } finally {
+                  setUpdateChecking(false);
+                }
+              },
+            },
+            updateChecking ? t('settings.updateChecking') : t('settings.updateCheck'),
+          ),
+          updateStatusOf(updateRecord) === 'available'
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-dsc-button dsh-dsc-primary',
+                  onClick: () => {
+                    try {
+                      window.open(REPO_URL + '/releases', '_blank', 'noopener,noreferrer');
+                    } catch (error) {
+                      /* Opening the releases page is best effort. */
+                    }
+                  },
+                },
+                t('settings.updateOpen'),
+              )
+            : null,
+        ),
       );
     }
 
@@ -9025,6 +9902,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         formatClock,
         historyStore,
         composeStore,
+        buildReverseContext,
+        fillComposerWithRetry,
+        parseVersion,
+        compareVersions,
+        isNewerVersion,
+        normalizeUpdateRecord,
+        loadUpdateRecord,
+        saveUpdateRecord,
+        updateStore,
+        updateStatusOf,
+        updateStatusText,
+        fetchLatestVersion,
+        refreshUpdate,
         buildReviewPrompt,
         reviewErrorText,
         reviewRouteUrl,

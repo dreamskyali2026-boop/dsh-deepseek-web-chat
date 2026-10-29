@@ -1,7 +1,7 @@
 {
   "name": "@local/dsh-deepseek-web-chat",
-  "version": "1.9.0",
-  "private": true,
+  "version": "2.0.0",
+  "private": false,
   "type": "module",
   "author": "Dream",
   "description": "A dedicated DeepSeek Web Chat window for the DeepSeek Harness desktop app, with structured, deduplicated and reversible handoffs into the Harness composer.",
@@ -21,11 +21,12 @@
     "harness"
   ],
   "engines": {
-    "node": ">=24",
+    "node": ">=22",
     "dsh": ">=0.2.1-rc.2"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check client.js && node --check index.js"
   },
   "exports": {
     ".": "./index.js",
@@ -39,7 +40,8 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "selectors.json"
+    "selectors.json",
+    "LICENSE"
   ],
   "dsh": {
     "manifestVersion": 1,
@@ -50,5 +52,6 @@
       "platform": "web",
       "immediately": true
     }
-  }
+  },
+  "license": "MIT"
 }

@@ -2,7 +2,7 @@
 
 [![test](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dreamskyali2026-boop/dsh-deepseek-web-chat/actions/workflows/test.yml)
 
-> 作者：Dream　·　当前版本：V1.9.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)
+> 作者：Dream　·　当前版本：V2.0.0　·　版本记录见 [版本迭代记录.md](./版本迭代记录.md)　·　许可证：[MIT](./LICENSE)
 
 在 DeepSeek Harness 桌面客户端里增加一个与主界面融合的 DeepSeek 网页聊天面板，直接加载 <https://chat.deepseek.com/>，并把聊清楚的内容预览、筛选、结构化后接力到 Harness 输入框；支持历史去重、反向补充上下文、完成通知和本地诊断。
 
@@ -21,6 +21,8 @@
 ### Quick Ask 紧凑小窗
 
 按 `Ctrl/⌘+Shift+Space`（或输入 `/deepseek-ask`）打开一个悬浮在 Harness 对话上的紧凑 DeepSeek 窗口，不切换主面板，适合临时追问；按 `Esc` 关闭，点顶栏展开按钮可回到完整面板。小窗复用同一个 DeepSeek 登录会话。按住标题栏空白处可拖动小窗到任意位置（拖动后位置会记住，下次打开仍在原处），标题栏聚焦时也可用方向键微调；窗口不会被拖出屏幕外。把小窗拖到**屏幕右缘**会出现分屏提示，松手即自动停靠为原生右侧栏 Tab，与 Harness 对话左右分屏；拖拽中按 `Esc` 取消并回到原位。
+
+小窗打开后光标会落在顶部提问条里：输入一句问题按 `Enter`（或点「填入」），这句话会被填进下面的 DeepSeek 输入框并聚焦，仍然由你在页面里确认发送。提问条只负责填入，不会自动发送；DeepSeek 输入框里已有草稿时不会覆盖。拖动窗口右下角可以调整宽高（双击恢复默认大小，聚焦后也可用方向键微调），尺寸与位置一起记住，并按视口夹紧。
 
 ### 草稿保护
 
@@ -98,6 +100,8 @@
 
 - 接力菜单的「把 Harness 上下文带到 DeepSeek…」会收集当前 Harness 会话标题和你最近选中的文字，允许补充报错或说明，确认后填入 DeepSeek 输入框，不自动发送。
 - 同一个弹层提供场景模板：需求评审、方案对比、代码审查、论文精读、文案撰写，一键填入起始提示词。
+- 弹层顶部可选填入位置：「当前对话」保持现状；「新对话」会先打开一个全新的 DeepSeek 对话，等输入框渲染出来后再把同一段上下文填进去（最多重试约 6 秒），同样不会自动发送。接力菜单里也有单独的「带 Harness 上下文开新对话…」入口，直接以新对话模式打开这个弹层。
+- 新对话打开期间面板会显示加载态；如果 DeepSeek 未登录、页面加载失败，或输入框里已有内容，会给出明确提示并保留你的文本，不覆盖草稿。
 
 ### 通知、未读与标题
 
@@ -111,6 +115,13 @@
 - 设置写入本地存储，修改立即生效，重启后保留；「恢复默认设置」不会清除历史。
 - 页面自检会检查登录状态、消息节点与输入框；异常时显示「页面结构可能已改版」横幅，可复制诊断信息。
 - 诊断只包含版本、选择器命中、登录状态、URL 和本地计数，不包含对话正文、文件路径或账号信息。
+- 「关于与更新」显示当前版本，并可手动「检查更新」：只读取本仓库 `package.json` 的 `version`（纯 GET，不发送任何用户数据），发现更高版本时给出「查看发布页」入口。面板打开时最多每 24 小时自动检查一次，失败会在 10 分钟后才重试；检查结果只存在本机。
+
+### 版本与更新（V2.0）
+
+- 版本号遵循 SemVer：`package.json`、面板与系统设置里的版本、`PLUGIN_VERSION` 三处保持一致，发布新版本时一起改；更新检查按 SemVer 比较，`2.0.0` 被视为比 `2.0.0-rc.1` 新。
+- 插件同时声明 `engines.node` 与 `engines.dsh`，安装到低于要求的环境时由插件管理器直接拒绝，而不是运行到一半才报错。
+- 更新检查只读版本号，不上报安装量、账号或对话内容；在设置里关闭远程选择器不影响更新检查，两者是独立请求。
 
 ### 远程选择器兜底
 
@@ -140,12 +151,13 @@
 - `package.json`：bundle 与客户端模块清单
 - `cordis.patch.yml`：向 profile 插入插件行
 - `index.js`：Host 半：认证路由 `POST /api/deepseek-web-chat.message`，用 `sessionQuery` 读取指定 assistant 消息的可见文本块（复核功能的数据来源）
-- `client.js`：侧栏图标、主内容区聊天面板、并排停靠、嵌入式浏览器租约、接力预览与编辑、接力前体检与打码、抓取保真、结构化摘要、历史去重与双向回跳、反向接力、输入框状态条、原生设置页、「发给 DeepSeek 复核」、通知、诊断
-- `tests/pure.test.mjs`：纯函数单测（接力范围、格式化、摘要、模板、hash、设置、历史、体检与打码、来源清洗、诊断、guest 探针、token 估算、复核提示词与队列）
+- `client.js`：侧栏图标、主内容区聊天面板、并排停靠、嵌入式浏览器租约、接力预览与编辑、接力前体检与打码、抓取保真、结构化摘要、历史去重与双向回跳、反向接力与新对话、Quick Ask 提问条与尺寸记忆、输入框状态条、原生设置页、「发给 DeepSeek 复核」、版本与更新检查、通知、诊断
+- `tests/pure.test.mjs`：纯函数与渲染单测（接力范围、格式化、摘要、模板、hash、设置、历史、体检与打码、来源清洗、诊断、guest 探针、token 估算、复核提示词与队列、SemVer 与更新检查、Quick Ask 几何与提问条、新对话填入重试）
+- `LICENSE`：MIT 许可证
 - `tests/host.test.mjs`：Host 半单测（路由注册、消息提取、截断、错误码、观察租约释放）
 - `locale/*.json`：插件管理器中显示的名称与说明
 - `icon.svg`：插件图标，使用 DeepSeek 官方网页 favicon 中的鲸鱼标记（<https://fe-static.deepseek.com/chat/favicon.svg>），仅用于标识 DeepSeek 网页聊天入口
-- `待开发需求.md`：V1.9 / V2 待开发需求与优先级
+- `待开发需求.md`：V2 待开发需求与优先级
 - `.github/workflows/test.yml`：GitHub Actions 单测 CI
 - `native-sidebar.png`：原生右侧栏并排效果图（README 顶部）
 - `screenshot.png`：V1.2 全屏面板效果图（留档）
@@ -157,10 +169,13 @@
 npm test
 ```
 
-单测通过 Node 内置测试运行器加载 `client.js` 的 `__test` 导出，不需要启动 Harness。GitHub Actions 会在 push / PR 时自动运行 `npm test`。
+单测通过 Node 内置测试运行器加载 `client.js` 的 `__test` 导出，不需要启动 Harness。GitHub Actions 会在 push / PR 时用 Node 22 与 24 两个版本运行 `npm run check` 与 `npm test`（当前 92 个用例）。
+
+只改 `client.js` 时，刷新 Harness 页面即可加载新代码；改动 `index.js`（Host 半、认证路由）需要重启 Harness。
 
 ## 兼容性说明
 
 - 内嵌网页依赖桌面端 preload 暴露的 `dshDesktop.browser` 租约接口。若未来客户端移除或修改该接口，插件会显示「当前环境不支持内嵌网页」，此时仍可使用「在浏览器中打开」；插件本身不会影响 Harness 启动。
 - 快捷键依赖 DSH 的 `shortcuts` 服务；若快捷键注册冲突，插件会跳过绑定并在控制台告警，不影响面板使用。
-- `package.json` 已声明 `dsh.manifestVersion`、`engines.dsh` 与仓库信息，便于后续发布到插件市场。
+- `package.json` 已声明 `dsh.manifestVersion`、`engines.node`、`engines.dsh`、`license`（MIT）与仓库信息，便于发布到插件市场；`private` 已关闭，但仍保留 `@local/` 名称，正式发布前需要换成市场要求的包名。
+- V2.0.0 是纯客户端增量（`index.js` 未改），刷新页面即可使用；更新检查会请求 GitHub Raw 上的 `package.json`，不可达时只显示「检查更新失败」，不影响其他功能。
