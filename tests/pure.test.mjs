@@ -96,6 +96,15 @@ const {
   formatClock,
   historyStore,
   composeStore,
+  reviewStore,
+  detectReviewVerdict,
+  sameReviewConversation,
+  normalizeReviewRecord,
+  loadReview,
+  normalizeReviewLogEntry,
+  loadReviewLog,
+  saveReviewLog,
+  recordReviewLog,
   buildReviewPrompt,
   reviewErrorText,
   reviewRouteUrl,
@@ -965,7 +974,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '2.0.0');
+  assert.equal(parsed.version, '2.1.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -1079,6 +1088,7 @@ test('guest observer snapshots the composer and clears it after sending', () => 
     tick();
     now += 1300;
     tick();
+    assert.equal(logs.includes('__DSH_DSC_SENT__'), true);
     assert.equal(
       logs.some((line) => line === '__DSH_DSC_DRAFT__{"text":"","at":3600,"title":"测试会话"}'),
       true,
@@ -2206,8 +2216,8 @@ test('review action renders one button and fills the review request', async () =
       {
         messageId: 'message-1',
         sessionId: 'session-1',
-        review: (text) => {
-          calls.push(text);
+        review: (text, meta) => {
+          calls.push({ text, meta });
           return true;
         },
         t,
@@ -2221,8 +2231,12 @@ test('review action renders one button and fills the review request', async () =
     await button.props.onClick();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(calls.length, 1);
-    assert.match(calls[0], /回复正文/);
-    assert.match(calls[0], /需求讨论/);
+    assert.match(calls[0].text, /回复正文/);
+    assert.match(calls[0].text, /需求讨论/);
+    assert.equal(calls[0].meta.sessionId, 'session-1');
+    assert.equal(calls[0].meta.messageId, 'message-1');
+    assert.equal(calls[0].meta.sessionTitle, '需求讨论');
+    assert.equal(calls[0].meta.chars, '回复正文'.length);
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -2269,8 +2283,8 @@ test('update records are validated, persisted and published', () => {
   assert.equal(normalizeUpdateRecord({ ok: true, version: '1.2.3' }), null);
   assert.equal(normalizeUpdateRecord(null), null);
   assert.equal(updateStatusOf(null), 'unchecked');
-  assert.equal(updateStatusOf({ ok: true, version: '2.0.1', checkedAt: 1 }), 'available');
-  assert.equal(updateStatusOf({ ok: true, version: '2.0.0', checkedAt: 1 }), 'current');
+  assert.equal(updateStatusOf({ ok: true, version: '2.2.0', checkedAt: 1 }), 'available');
+  assert.equal(updateStatusOf({ ok: true, version: '2.1.0', checkedAt: 1 }), 'current');
   assert.equal(updateStatusOf({ ok: false, version: '', checkedAt: 1 }), 'error');
 
   let notifications = 0;
@@ -2313,7 +2327,7 @@ test('refreshUpdate caches a fresh result and records failures', async () => {
   let calls = 0;
   const manifest = async () => {
     calls += 1;
-    return { ok: true, json: async () => ({ version: '2.0.1' }) };
+    return { ok: true, json: async () => ({ version: '2.2.0' }) };
   };
   assert.equal(await refreshUpdate({ force: true, fetch: manifest }), 'available');
   assert.equal(calls, 1);
@@ -2327,11 +2341,11 @@ test('refreshUpdate caches a fresh result and records failures', async () => {
 
 test('updateStatusText explains cached states without leaking anything', () => {
   const available = updateStatusText(
-    { ok: true, version: '2.0.1', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
+    { ok: true, version: '2.2.0', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
     t,
   );
   assert.match(available, /settings\.updateAvailable/);
-  assert.match(available, /version=2\.0\.1/);
+  assert.match(available, /version=2\.2\.0/);
   assert.equal(updateStatusText(null, t), 'settings.updateUnchecked');
   assert.equal(updateStatusText({ ok: false, version: '', checkedAt: 1, error: 'x' }, t), 'settings.updateError');
 });
@@ -2534,6 +2548,445 @@ test('reverse handoff offers a new-chat target', () => {
     assert.match(flat, /reverse\.newChatHint/);
     assert.match(flat, /reverse\.newChatFill/);
   } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+// --- V2.1: review backfill -------------------------------------------------
+
+test('detectReviewVerdict distinguishes clean replies from suggestions', () => {
+  assert.equal(detectReviewVerdict(''), 'unknown');
+  assert.equal(detectReviewVerdict('   '), 'unknown');
+  assert.equal(detectReviewVerdict('复核完毕：未发现问题。'), 'clean');
+  assert.equal(detectReviewVerdict('没有发现明显问题，可以继续。'), 'clean');
+  assert.equal(detectReviewVerdict('No issues found.'), 'clean');
+  assert.equal(detectReviewVerdict('第 2 点引用有误，建议改写。'), 'issues');
+});
+
+test('sameReviewConversation tolerates the root URL before the chat path exists', () => {
+  assert.equal(sameReviewConversation('', 'https://chat.deepseek.com/a/chat/s/1'), true);
+  assert.equal(
+    sameReviewConversation('https://chat.deepseek.com/', 'https://chat.deepseek.com/a/chat/s/1'),
+    true,
+  );
+  assert.equal(
+    sameReviewConversation(
+      'https://chat.deepseek.com/a/chat/s/1',
+      'https://chat.deepseek.com/a/chat/s/1?from=history',
+    ),
+    true,
+  );
+  assert.equal(
+    sameReviewConversation(
+      'https://chat.deepseek.com/a/chat/s/1',
+      'https://chat.deepseek.com/a/chat/s/2',
+    ),
+    false,
+  );
+  assert.equal(
+    sameReviewConversation('https://chat.deepseek.com/a/chat/s/1', 'https://example.com/a/chat/s/1'),
+    false,
+  );
+});
+
+test('review records validate identifiers and clamp persisted fields', () => {
+  const record = normalizeReviewRecord({
+    status: 'waiting',
+    sessionId: '  session-1  ',
+    messageId: 'message-1',
+    sessionTitle: ' 需求讨论 ',
+    askedAt: 1000,
+    sourceUrl: 'https://chat.deepseek.com/a/chat/s/1',
+    chars: '42',
+  });
+  assert.equal(record.sessionId, 'session-1');
+  assert.equal(record.sessionTitle, '需求讨论');
+  assert.equal(record.chars, 42);
+  assert.equal(normalizeReviewRecord(null), null);
+  assert.equal(normalizeReviewRecord({ status: 'waiting', sessionId: '', messageId: 'm', askedAt: 1 }), null);
+  assert.equal(normalizeReviewRecord({ status: 'done' }), null);
+  assert.equal(
+    normalizeReviewRecord({ status: 'ready', sessionId: 's', messageId: 'm', askedAt: 1, readyAt: 0 }),
+    null,
+  );
+});
+
+test('reviewStore waits, matches the conversation and expires stale requests', () => {
+  const previous = globalThis.window;
+  globalThis.window = fakeWindow;
+  try {
+    reviewStore.set(null);
+    const sourceUrl = 'https://chat.deepseek.com/a/chat/s/1';
+    const armed = reviewStore.arm({
+      sessionId: 's1',
+      messageId: 'm1',
+      sessionTitle: '需求',
+      chars: 1200,
+      sourceUrl,
+    });
+    assert.equal(armed.status, 'waiting');
+    assert.equal(armed.sentAt, 0);
+    assert.equal(loadReview().messageId, 'm1');
+    assert.equal(reviewStore.ready({ url: sourceUrl }), null);
+    assert.equal(reviewStore.getSnapshot().status, 'waiting');
+    const sent = reviewStore.markSent();
+    assert.ok(sent.sentAt > 0);
+    assert.equal(reviewStore.ready({ url: 'https://chat.deepseek.com/a/chat/s/2' }), null);
+    assert.equal(reviewStore.getSnapshot().status, 'waiting');
+    const ready = reviewStore.ready({ url: sourceUrl });
+    assert.equal(ready.status, 'ready');
+    assert.ok(ready.readyAt > 0);
+    assert.equal(loadReview(Date.now() + 3 * 60 * 60 * 1000), null);
+    reviewStore.clear();
+    assert.equal(reviewStore.getSnapshot(), null);
+  } finally {
+    globalThis.window = previous;
+    reviewStore.set(null);
+  }
+});
+
+test('review log keeps the newest bounded records', () => {
+  const previous = globalThis.window;
+  globalThis.window = fakeWindow;
+  try {
+    saveReviewLog([]);
+    for (let index = 0; index < 24; index += 1) {
+      recordReviewLog({
+        id: 'review-' + index,
+        sessionId: 's1',
+        messageId: 'm' + index,
+        sessionTitle: '会话 ' + index,
+        verdict: index % 2 === 0 ? 'clean' : 'issues',
+        chars: index,
+      });
+    }
+    const rows = loadReviewLog();
+    assert.equal(rows.length, 20);
+    assert.equal(rows[0].id, 'review-23');
+    assert.equal(rows.filter((row) => row.verdict === 'clean').length, 10);
+    assert.equal(normalizeReviewLogEntry({ at: 0 }), null);
+    assert.equal(recordReviewLog({ sessionId: 's1' }).length, 20);
+  } finally {
+    saveReviewLog([]);
+    globalThis.window = previous;
+  }
+});
+
+test('formatHandoff supports a review scope and instruction', () => {
+  const text = formatHandoff([{ role: 'assistant', text: '建议 A' }], 'last', false, t, {
+    safety: false,
+    format: 'raw',
+    scope: '复核意见',
+    instruction: '逐条判断',
+  });
+  assert.match(text, /scope=复核意见/);
+  assert.match(text, /review\.instructionHeading/);
+  assert.match(text, /逐条判断/);
+  assert.equal(text.includes('handoff.menu.last'), false);
+});
+
+test('composeStore carries review metadata with the pending fill', () => {
+  composeStore.take();
+  assert.equal(
+    composeStore.request('内容', 'review', {
+      sessionId: 's1',
+      messageId: 'm1',
+      sessionTitle: '会话',
+      chars: 12,
+    }),
+    true,
+  );
+  assert.deepEqual(composeStore.getSnapshot().meta, {
+    sessionId: 's1',
+    messageId: 'm1',
+    sessionTitle: '会话',
+    chars: 12,
+  });
+  composeStore.take();
+});
+
+test('ChatPanel shows the pending review banner and capture action', () => {
+  const refs = [];
+  const states = [];
+  let stateIndex = 0;
+  let refIndex = 0;
+  Object.assign(reactStub, {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+      if (index === 0) states[index] = true;
+      if (index === 3) states[index] = 'ready';
+      if (index === 13) states[index] = 'in';
+      const setter = (value) => {
+        states[index] = typeof value === 'function' ? value(states[index]) : value;
+      };
+      return [states[index], setter];
+    },
+    useRef(initial) {
+      const index = refIndex++;
+      if (!(index in refs)) refs[index] = { current: initial };
+      return refs[index];
+    },
+    useEffect() {},
+    useLayoutEffect() {},
+    useCallback(fn) {
+      return fn;
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  });
+  reviewStore.set({
+    status: 'ready',
+    sessionId: 's1',
+    messageId: 'm1',
+    sessionTitle: '需求讨论',
+    askedAt: Date.now() - 1000,
+    readyAt: Date.now(),
+    chars: 10,
+    sourceUrl: '',
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { ...previousWindow, innerWidth: 1400, innerHeight: 900 };
+  try {
+    const panel = ChatPanel({
+      back() {},
+      open() {},
+      delivery: { currentSessionId() { return 's1'; }, deliver() { return { ok: false }; } },
+      listTargets() {
+        return [{ id: 's1', title: '当前会话', cwd: '/tmp' }];
+      },
+      t,
+      usePanelInfo(selector) {
+        return selector({ activePanelId: 'deepseek-web-chat' });
+      },
+    });
+    const flat = JSON.stringify(panel);
+    assert.match(flat, /dsh-dsc-review-banner/);
+    assert.match(flat, /review\.banner\.ready/);
+    assert.match(flat, /review\.capture/);
+    assert.match(flat, /review\.dismiss/);
+  } finally {
+    reviewStore.set(null);
+    globalThis.window = previousWindow;
+  }
+});
+
+test('preview labels a review backfill and shows its verdict', () => {
+  const refs = [];
+  const states = [];
+  let stateIndex = 0;
+  let refIndex = 0;
+  Object.assign(reactStub, {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+      if (index === 0) states[index] = true;
+      if (index === 3) states[index] = 'ready';
+      if (index === 13) states[index] = 'in';
+      if (index === 11) {
+        states[index] = {
+          mode: 'last',
+          truncated: false,
+          messages: [{ id: 0, key: 'k1', role: 'assistant', text: '未发现问题', selected: true }],
+          targets: [{ id: 's1', title: '当前会话' }],
+          targetSessionId: 's1',
+          format: 'raw',
+          template: 'none',
+          safety: true,
+          showText: true,
+          returnToHarness: true,
+          autoSend: false,
+          insertPosition: 'end',
+          insertion: null,
+          sourceUrl: 'https://chat.deepseek.com/a/chat/s/1',
+          sourceTitle: '来源讨论',
+          maskedIds: [],
+          editedText: null,
+          review: {
+            sessionId: 's1',
+            messageId: 'm1',
+            sessionTitle: '需求讨论',
+            askedAt: Date.now() - 1000,
+            readyAt: Date.now(),
+            verdict: 'clean',
+            mismatch: false,
+          },
+        };
+      }
+      const setter = (value) => {
+        states[index] = typeof value === 'function' ? value(states[index]) : value;
+      };
+      return [states[index], setter];
+    },
+    useRef(initial) {
+      const index = refIndex++;
+      if (!(index in refs)) refs[index] = { current: initial };
+      return refs[index];
+    },
+    useEffect() {},
+    useLayoutEffect() {},
+    useCallback(fn) {
+      return fn;
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { ...previousWindow, innerWidth: 1400, innerHeight: 900 };
+  try {
+    const panel = ChatPanel({
+      back() {},
+      open() {},
+      delivery: { currentSessionId() { return 's1'; }, deliver() { return { ok: false }; } },
+      listTargets() {
+        return [{ id: 's1', title: '当前会话', cwd: '/tmp' }];
+      },
+      t,
+      usePanelInfo(selector) {
+        return selector({ activePanelId: 'deepseek-web-chat' });
+      },
+    });
+    const flat = JSON.stringify(panel);
+    assert.match(flat, /dsh-dsc-preview-review/);
+    assert.match(flat, /review\.previewTitle/);
+    assert.match(flat, /review\.badge/);
+    assert.match(flat, /review\.verdict\.clean/);
+    assert.match(flat, /review\.instructionHeading/);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test('inserting a review backfill records it and clears the pending state', async () => {
+  const refs = [];
+  const states = [];
+  let stateIndex = 0;
+  let refIndex = 0;
+  Object.assign(reactStub, {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+      if (index === 0) states[index] = true;
+      if (index === 3) states[index] = 'ready';
+      if (index === 13) states[index] = 'in';
+      if (index === 11) {
+        states[index] = {
+          mode: 'last',
+          truncated: false,
+          messages: [{ id: 0, key: 'k1', role: 'assistant', text: '未发现问题', selected: true }],
+          targets: [{ id: 's1', title: '当前会话' }],
+          targetSessionId: 's1',
+          format: 'raw',
+          template: 'none',
+          safety: true,
+          showText: false,
+          returnToHarness: false,
+          autoSend: false,
+          insertPosition: 'end',
+          insertion: null,
+          sourceUrl: 'https://chat.deepseek.com/a/chat/s/1',
+          sourceTitle: '来源讨论',
+          maskedIds: [],
+          editedText: null,
+          review: {
+            sessionId: 's1',
+            messageId: 'm1',
+            sessionTitle: '需求讨论',
+            askedAt: Date.now() - 1000,
+            sentAt: Date.now() - 900,
+            readyAt: Date.now(),
+            verdict: 'clean',
+            mismatch: false,
+          },
+        };
+      }
+      const setter = (value) => {
+        states[index] = typeof value === 'function' ? value(states[index]) : value;
+      };
+      return [states[index], setter];
+    },
+    useRef(initial) {
+      const index = refIndex++;
+      if (!(index in refs)) refs[index] = { current: initial };
+      return refs[index];
+    },
+    useEffect() {},
+    useLayoutEffect() {},
+    useCallback(fn) {
+      return fn;
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { ...previousWindow, innerWidth: 1400, innerHeight: 900 };
+  saveReviewLog([]);
+  reviewStore.set({
+    status: 'ready',
+    sessionId: 's1',
+    messageId: 'm1',
+    sessionTitle: '需求讨论',
+    askedAt: Date.now() - 1000,
+    sentAt: Date.now() - 900,
+    readyAt: Date.now(),
+    chars: 10,
+    sourceUrl: 'https://chat.deepseek.com/a/chat/s/1',
+  });
+  try {
+    const panel = ChatPanel({
+      back() {},
+      open() {},
+      delivery: {
+        currentSessionId() {
+          return 's1';
+        },
+        deliver() {
+          return { ok: true, sessionId: 's1', inserted: '未发现问题', position: 'end' };
+        },
+      },
+      listTargets() {
+        return [{ id: 's1', title: '当前会话', cwd: '/tmp' }];
+      },
+      t,
+      usePanelInfo(selector) {
+        return selector({ activePanelId: 'deepseek-web-chat' });
+      },
+    });
+    const findInsert = (node) => {
+      if (node === null || typeof node !== 'object') return null;
+      const props = node.props || {};
+      if (node.type === 'button' && String(props.children) === 'preview.insert') return node;
+      const children = Array.isArray(props.children) ? props.children : [props.children];
+      for (const child of children) {
+        const found = findInsert(child);
+        if (found !== null) return found;
+      }
+      return null;
+    };
+    const button = findInsert(panel);
+    assert.ok(button !== null);
+    button.props.onClick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const rows = loadReviewLog();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].sessionTitle, '需求讨论');
+    assert.equal(rows[0].verdict, 'clean');
+    assert.equal(reviewStore.getSnapshot(), null);
+  } finally {
+    saveReviewLog([]);
+    reviewStore.set(null);
     globalThis.window = previousWindow;
   }
 });

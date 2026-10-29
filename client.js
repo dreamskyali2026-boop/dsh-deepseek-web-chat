@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '2.0.0';
+    const PLUGIN_VERSION = '2.1.0';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -49,6 +49,11 @@ window.__ModuleLoader__.load({
     const REVIEW_ROUTE = 'api/deepseek-web-chat.message';
     const REVIEW_TIMEOUT_MS = 8000;
     const REVIEW_PENDING_TTL_MS = 120000;
+    const REVIEW_KEY = 'dsh-deepseek-web-chat.review.v1';
+    const REVIEW_LOG_KEY = 'dsh-deepseek-web-chat.review-log.v1';
+    const REVIEW_TTL_MS = 2 * 60 * 60 * 1000;
+    const REVIEW_LOG_LIMIT = 20;
+    const REVIEW_STATUSES = ['waiting', 'ready'];
     const QUICK_MIN_WIDTH = 320;
     const QUICK_MIN_HEIGHT = 320;
     const NEW_CHAT_FILL_ATTEMPTS = 12;
@@ -132,13 +137,20 @@ window.__ModuleLoader__.load({
         composeListeners.add(listener);
         return () => composeListeners.delete(listener);
       },
-      request(text, source) {
+      request(text, source, meta) {
         const value = typeof text === 'string' ? text : '';
         if (value.trim() === '') return false;
+        const details = meta !== null && typeof meta === 'object' ? meta : {};
         pendingCompose = {
           text: value,
           source: typeof source === 'string' && source !== '' ? source : 'review',
           at: Date.now(),
+          meta: {
+            sessionId: typeof details.sessionId === 'string' ? details.sessionId.slice(0, 200) : '',
+            messageId: typeof details.messageId === 'string' ? details.messageId.slice(0, 200) : '',
+            sessionTitle: typeof details.sessionTitle === 'string' ? details.sessionTitle.slice(0, 160) : '',
+            chars: Number.isFinite(Number(details.chars)) ? Math.max(0, Math.round(Number(details.chars))) : 0,
+          },
         };
         for (const listener of [...composeListeners]) {
           try {
@@ -182,6 +194,212 @@ window.__ModuleLoader__.load({
       } catch (error) {
         return false;
       }
+    }
+
+    // --- Review backfill (V2.1) ---------------------------------------------
+    // V1.9 can send a Harness reply to DeepSeek for review. This half remembers
+    // that request, notices when DeepSeek finishes the review reply, and hands
+    // the captured text back through the normal preview/insert path. Only the
+    // small record lives in storage; the reply itself is read from the page on
+    // demand, so no conversation text is persisted by this feature.
+
+    /**
+     * @param text - captured review reply.
+     * @returns `clean` when DeepSeek reported no issue, `issues` otherwise.
+     */
+    function detectReviewVerdict(text) {
+      const value = typeof text === 'string' ? text : '';
+      if (value.trim() === '') return 'unknown';
+      if (
+        /未发现.{0,6}问题|没有发现.{0,6}问题|无(?:明显)?问题|未发现需要修改|no issues? (?:were )?found|nothing to (?:fix|change)/i.test(
+          value,
+        )
+      ) {
+        return 'clean';
+      }
+      return 'issues';
+    }
+
+    /**
+     * Compare two DeepSeek page URLs without treating a root URL as a different
+     * conversation: the chat path only appears after the first message is sent.
+     * @returns whether both URLs can still refer to the same conversation.
+     */
+    function sameReviewConversation(left, right) {
+      const a = normalizeSourceUrl(left);
+      const b = normalizeSourceUrl(right);
+      if (a === '' || b === '') return true;
+      if (a === b) return true;
+      try {
+        const first = new URL(a);
+        const second = new URL(b);
+        if (first.origin !== second.origin) return false;
+        const firstChat = /\/a\/chat\/s\//.test(first.pathname);
+        const secondChat = /\/a\/chat\/s\//.test(second.pathname);
+        return firstChat && secondChat ? first.pathname === second.pathname : true;
+      } catch (error) {
+        return true;
+      }
+    }
+
+    function normalizeReviewRecord(value) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+      const status = REVIEW_STATUSES.includes(value.status) ? value.status : '';
+      if (status === '') return null;
+      const sessionId = typeof value.sessionId === 'string' ? value.sessionId.trim().slice(0, 200) : '';
+      const messageId = typeof value.messageId === 'string' ? value.messageId.trim().slice(0, 200) : '';
+      const askedAt = Number(value.askedAt);
+      const readyAt = Number(value.readyAt);
+      const sentAt = Number(value.sentAt);
+      if (sessionId === '' || messageId === '') return null;
+      if (!Number.isFinite(askedAt) || askedAt <= 0) return null;
+      if (status === 'ready' && (!Number.isFinite(readyAt) || readyAt <= 0)) return null;
+      return {
+        status,
+        sessionId,
+        messageId,
+        sessionTitle: typeof value.sessionTitle === 'string' ? value.sessionTitle.trim().slice(0, 160) : '',
+        sourceUrl: normalizeSourceUrl(value.sourceUrl),
+        askedAt: Math.round(askedAt),
+        sentAt: Number.isFinite(sentAt) && sentAt > 0 ? Math.round(sentAt) : 0,
+        readyAt: status === 'ready' ? Math.round(readyAt) : 0,
+        chars: Number.isFinite(Number(value.chars)) ? Math.max(0, Math.round(Number(value.chars))) : 0,
+      };
+    }
+
+    function loadReview(now) {
+      const record = normalizeReviewRecord(readJson(REVIEW_KEY, null));
+      if (record === null) return null;
+      const current = Number.isFinite(now) ? now : Date.now();
+      if (current - record.askedAt > REVIEW_TTL_MS || record.askedAt - current > 24 * 60 * 60 * 1000) return null;
+      return record;
+    }
+
+    let reviewValue = loadReview();
+    const reviewListeners = new Set();
+    const reviewStore = {
+      getSnapshot: () => reviewValue,
+      subscribe(listener) {
+        reviewListeners.add(listener);
+        return () => reviewListeners.delete(listener);
+      },
+      set(record) {
+        reviewValue = normalizeReviewRecord(record);
+        if (reviewValue === null) {
+          try {
+            window.localStorage.removeItem(REVIEW_KEY);
+          } catch (error) {
+            /* Review storage is best effort. */
+          }
+        } else {
+          writeJson(REVIEW_KEY, reviewValue);
+        }
+        for (const listener of [...reviewListeners]) {
+          try {
+            listener();
+          } catch (error) {
+            /* Review listeners are best effort. */
+          }
+        }
+        return reviewValue;
+      },
+      /** Remember that a review request was filled into the DeepSeek composer. */
+      arm(meta) {
+        const details = meta !== null && typeof meta === 'object' ? meta : {};
+        const record = normalizeReviewRecord({
+          status: 'waiting',
+          sessionId: details.sessionId,
+          messageId: details.messageId,
+          sessionTitle: details.sessionTitle,
+          sourceUrl: details.sourceUrl,
+          askedAt: Date.now(),
+          sentAt: 0,
+          readyAt: 0,
+          chars: details.chars,
+        });
+        if (record === null) return null;
+        reviewStore.set(record);
+        return reviewStore.getSnapshot();
+      },
+      /** Remember that the filled review request left the composer. */
+      markSent() {
+        const current = reviewValue;
+        if (current === null || current.status !== 'waiting' || current.sentAt > 0) return current;
+        reviewStore.set({ ...current, sentAt: Date.now() });
+        return reviewStore.getSnapshot();
+      },
+      /** Mark the pending review ready when DeepSeek finishes a reply. */
+      ready(payload) {
+        const current = reviewValue;
+        if (current === null || current.status !== 'waiting') return null;
+        if (Date.now() - current.askedAt > REVIEW_TTL_MS) {
+          reviewStore.set(null);
+          return null;
+        }
+        // A reply that completed before the request was sent is not a review
+        // reply; waiting for the composer to clear avoids that false positive.
+        if (current.sentAt === 0) return null;
+        const row = payload !== null && typeof payload === 'object' ? payload : {};
+        const pageUrl = normalizeSourceUrl(row.url);
+        if (!sameReviewConversation(current.sourceUrl, pageUrl)) return null;
+        reviewStore.set({
+          ...current,
+          status: 'ready',
+          readyAt: Date.now(),
+        });
+        return reviewStore.getSnapshot();
+      },
+      clear() {
+        return reviewStore.set(null);
+      },
+    };
+
+    function normalizeReviewLogEntry(value) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+      const at = Number(value.at);
+      if (!Number.isFinite(at) || at <= 0) return null;
+      const verdict = value.verdict === 'clean' || value.verdict === 'issues' ? value.verdict : 'unknown';
+      return {
+        id:
+          typeof value.id === 'string' && value.id !== ''
+            ? value.id.slice(0, 240)
+            : 'review-' + String(Math.round(at)),
+        at: Math.round(at),
+        sessionId: typeof value.sessionId === 'string' ? value.sessionId.slice(0, 200) : '',
+        messageId: typeof value.messageId === 'string' ? value.messageId.slice(0, 200) : '',
+        sessionTitle: typeof value.sessionTitle === 'string' ? value.sessionTitle.trim().slice(0, 160) : '',
+        verdict,
+        chars: Number.isFinite(Number(value.chars)) ? Math.max(0, Math.round(Number(value.chars))) : 0,
+      };
+    }
+
+    function loadReviewLog() {
+      const raw = readJson(REVIEW_LOG_KEY, []);
+      if (!Array.isArray(raw)) return [];
+      const rows = [];
+      for (const entry of raw) {
+        const row = normalizeReviewLogEntry(entry);
+        if (row !== null) rows.push(row);
+        if (rows.length >= REVIEW_LOG_LIMIT) break;
+      }
+      return rows;
+    }
+
+    function saveReviewLog(rows) {
+      const next = [];
+      for (const entry of Array.isArray(rows) ? rows : []) {
+        const row = normalizeReviewLogEntry(entry);
+        if (row !== null) next.push(row);
+        if (next.length >= REVIEW_LOG_LIMIT) break;
+      }
+      writeJson(REVIEW_LOG_KEY, next);
+      return next;
+    }
+
+    function recordReviewLog(entry) {
+      const row = normalizeReviewLogEntry({ ...(entry === null || typeof entry !== 'object' ? {} : entry), at: Date.now() });
+      if (row === null) return loadReviewLog();
+      return saveReviewLog([row, ...loadReviewLog()]);
     }
 
     function normalizeSettings(value) {
@@ -1049,7 +1267,7 @@ window.__ModuleLoader__.load({
       'settings.selectorRefresh': '立即刷新选择器',
       'settings.selectorRefreshed': '已更新远程选择器',
       'settings.stats': '本地统计',
-      'settings.statsBody': '打开 {open} 次 · 接力 {preview} 次 · 成功 {ok} 次 · 失败 {failed} 次 · 撤销 {undo} 次',
+      'settings.statsBody': '打开 {open} 次 · 接力 {preview} 次 · 成功 {ok} 次 · 失败 {failed} 次 · 撤销 {undo} 次 · 复核回填 {review} 次',
       'settings.copyStats': '复制统计',
       'settings.copyDiagnostics': '复制诊断信息',
       'settings.reportIssue': '报告问题',
@@ -1113,6 +1331,34 @@ window.__ModuleLoader__.load({
       'review.error.notFound': '找不到这条回复（会话可能已删除或来自旧版本）',
       'review.error.empty': '这条回复没有可复核的文字',
       'review.error.host': '读取回复失败，请重试',
+      'review.banner.waiting': '复核请求已填入 DeepSeek（{title}）。发送并等它回复后，可在这里取回意见。',
+      'review.banner.ready': 'DeepSeek 的复核意见已返回（{time}）· {title}',
+      'review.readyToast': 'DeepSeek 的复核意见已返回',
+      'review.capture': '取回复核意见',
+      'review.captureNow': '我已发送，现在取回',
+      'review.dismiss': '忽略',
+      'review.notReady': '复核意见还没准备好；请等 DeepSeek 回复完成后再取回。',
+      'review.previewTitle': '带回复核意见',
+      'review.previewMeta': '{title} · {time} 返回',
+      'review.badge': 'DeepSeek 复核意见',
+      'review.scope': 'DeepSeek 复核意见',
+      'review.instruction':
+        '请逐条判断以上复核意见：成立的就直接修正，不成立的说明理由；修正后给出改了哪些地方。',
+      'review.instructionHeading': '处理要求',
+      'review.verdict.clean': '未发现问题',
+      'review.verdict.issues': '已给出修改建议',
+      'review.verdict.unknown': '已返回意见',
+      'review.notifyTitle': 'DeepSeek 复核意见已返回',
+      'review.notifyBody': '点击回到面板取回 · {preview}',
+      'review.menu': '取回复核意见…',
+      'review.mismatch': '当前 DeepSeek 对话与复核请求所在对话不同，请确认取回的是这条意见',
+      'review.returned': '复核意见已插入 Harness 输入框',
+      'review.returnedStats': '复核意见已插入 · {chars} 字 · 约 {tokens} tokens',
+      'review.log.title': '最近复核',
+      'review.log.empty': '还没有取回过复核意见。',
+      'review.log.clear': '清空复核记录',
+      'review.log.cleared': '复核记录已清空',
+      'review.log.chars': '{count} 字',
       'template.implement.directive': '请按以上讨论实现。先给一句简短计划，再修改代码，并说明如何验证。',
       'template.planFirst.directive': '请先只给出实施计划（步骤、涉及文件、风险、验证方式），暂时不要修改代码。',
       'template.review.directive': '请把以上内容当作待审查的需求或方案，指出问题、风险、遗漏，并给出改进建议。',
@@ -1424,7 +1670,7 @@ window.__ModuleLoader__.load({
       'settings.selectorRefresh': 'Refresh selectors now',
       'settings.selectorRefreshed': 'Remote selectors updated',
       'settings.stats': 'Local stats',
-      'settings.statsBody': '{open} opens · {preview} handoffs · {ok} succeeded · {failed} failed · {undo} undo',
+      'settings.statsBody': '{open} opens · {preview} handoffs · {ok} succeeded · {failed} failed · {undo} undo · {review} review backfills',
       'settings.copyStats': 'Copy stats',
       'settings.copyDiagnostics': 'Copy diagnostics',
       'settings.reportIssue': 'Report an issue',
@@ -1489,6 +1735,35 @@ window.__ModuleLoader__.load({
       'review.error.notFound': 'That reply is no longer available',
       'review.error.empty': 'That reply has no text to review',
       'review.error.host': 'Could not read the reply; try again',
+      'review.banner.waiting':
+        'Review request filled into DeepSeek ({title}). Send it, then capture the reply here when it arrives.',
+      'review.banner.ready': 'DeepSeek review reply is ready ({time}) · {title}',
+      'review.readyToast': 'DeepSeek review reply is ready',
+      'review.capture': 'Capture review',
+      'review.captureNow': 'I sent it, capture now',
+      'review.dismiss': 'Dismiss',
+      'review.notReady': 'The review reply is not ready yet; wait for DeepSeek to finish and try again.',
+      'review.previewTitle': 'Bring the review back',
+      'review.previewMeta': '{title} · returned {time}',
+      'review.badge': 'DeepSeek review',
+      'review.scope': 'DeepSeek review',
+      'review.instruction':
+        'Judge each review point above: fix the ones that hold, explain why the others do not, and list what changed.',
+      'review.instructionHeading': 'How to handle it',
+      'review.verdict.clean': 'No issues found',
+      'review.verdict.issues': 'Suggestions returned',
+      'review.verdict.unknown': 'Review returned',
+      'review.notifyTitle': 'DeepSeek review reply is ready',
+      'review.notifyBody': 'Click to open the panel and capture it · {preview}',
+      'review.menu': 'Capture review reply…',
+      'review.mismatch': 'This DeepSeek chat differs from the one the review was requested in; check that this is the right reply',
+      'review.returned': 'Review inserted into the Harness composer',
+      'review.returnedStats': 'Review inserted · {chars} chars · ~{tokens} tokens',
+      'review.log.title': 'Recent reviews',
+      'review.log.empty': 'No review reply has been captured yet.',
+      'review.log.clear': 'Clear review records',
+      'review.log.cleared': 'Review records cleared',
+      'review.log.chars': '{count} chars',
       'template.implement.directive': 'Implement the discussion above. Give a one-line plan, change the code, and explain how to verify it.',
       'template.planFirst.directive': 'Give an implementation plan first (steps, files, risks, verification). Do not change code yet.',
       'template.review.directive': 'Review the requirements or plan above. Point out problems, risks and gaps, then suggest improvements.',
@@ -2175,6 +2450,61 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   line-height: 1.4;
 }
 .dsh-dsc-preview-capture-copy { flex: 1 1 auto; min-width: 0; }
+.dsh-dsc-preview-review {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 32%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 9%, var(--dsw-alias-bg-base));
+}
+.dsh-dsc-review-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);
+  color: var(--dsw-alias-state-business-primary);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dsh-dsc-review-verdict {
+  flex: none;
+  color: #b0741f;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.dsh-dsc-review-verdict[data-clean='true'] { color: #2f8f5b; }
+.dsh-dsc-review-banner {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, var(--dsw-alias-bg-base));
+}
+.dsh-dsc-review-log {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.dsh-dsc-review-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.dsh-dsc-review-log-time { flex: none; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary); }
+.dsh-dsc-review-log-verdict { flex: none; color: #b0741f; }
+.dsh-dsc-review-log-verdict[data-clean='true'] { color: #2f8f5b; }
+.dsh-dsc-review-log-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-dsc-review-log-chars { flex: none; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }
 .dsh-dsc-chip {
   height: 26px;
   padding: 0 9px;
@@ -4252,11 +4582,16 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const format = HANDOFF_FORMATS.includes(config.format) ? config.format : 'raw';
       const template = HANDOFF_TEMPLATES.includes(config.template) ? config.template : 'none';
       const directive = templateDirective(template, t);
+      const instruction = typeof config.instruction === 'string' ? config.instruction.trim() : '';
+      const scope =
+        typeof config.scope === 'string' && config.scope.trim() !== ''
+          ? config.scope.trim()
+          : t('handoff.menu.' + mode);
       const isCommand = template === 'goal' || template === 'planCommand';
       const lines = [];
       if (safety) lines.push(t('handoff.safetyHeader'), t('handoff.safetyNote'), '');
       else lines.push(t('handoff.header'));
-      lines.push(t('handoff.meta', { time: formatStamp(new Date()), scope: t('handoff.menu.' + mode) }));
+      lines.push(t('handoff.meta', { time: formatStamp(new Date()), scope }));
       if (truncated) lines.push(t('handoff.truncatedNote'));
       lines.push('');
       if (format === 'summary') {
@@ -4278,6 +4613,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           );
         }
       }
+      if (instruction !== '') lines.push('', t('review.instructionHeading'), '', instruction);
       if (directive !== '' && !isCommand) lines.push('', t('handoff.directiveHeading'), '', directive);
       const body = lines.join('\n').trim() + '\n';
       const wrapped = safety ? '<' + SAFETY_TAG + '>\n' + body + '</' + SAFETY_TAG + '>\n' : body;
@@ -4811,8 +5147,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         const now = Date.now();
         const draft = readDraft();
         if (draft !== lastDraft) {
+          const wasFilled = String(lastDraft || '').trim() !== '';
           lastDraft = draft;
           draftChangedAt = now;
+          // Report a filled composer becoming empty immediately: this is the
+          // earliest signal that the user sent the message, and the review
+          // feature uses it to know a later reply belongs to that request.
+          if (wasFilled && draft.trim() === '') {
+            try {
+              console.log('__DSH_DSC_SENT__');
+            } catch (error) {
+              /* Sent reporting is best effort. */
+            }
+          }
         } else if (now - draftChangedAt >= 1200) {
           if (draft.trim() === '' && hadDraft) {
             hadDraft = false;
@@ -4838,7 +5185,11 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           try {
             console.log(
               '__DSH_DSC_DONE__' +
-                JSON.stringify({ title: String(document.title || '').slice(0, 160), preview: text.slice(0, 140) }),
+                JSON.stringify({
+                  title: String(document.title || '').slice(0, 160),
+                  preview: text.slice(0, 140),
+                  url: String((typeof location !== 'undefined' && location.href) || ''),
+                }),
             );
           } catch (error) {
             /* Completion reporting is best effort. */
@@ -5385,6 +5736,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const pendingNewChatRef = React.useRef(null);
       const updateLastCheckRef = React.useRef(0);
       const updateRecord = React.useSyncExternalStore(updateStore.subscribe, updateStore.getSnapshot);
+      const reviewRecord = React.useSyncExternalStore(reviewStore.subscribe, reviewStore.getSnapshot);
       const [historyQuery, setHistoryQuery] = React.useState('');
       const [menuPosition, setMenuPosition] = React.useState(null);
       const [draftOffer, setDraftOffer] = React.useState(() => loadDraft());
@@ -5394,6 +5746,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const [quickResizing, setQuickResizing] = React.useState(false);
       const [quickAsk, setQuickAsk] = React.useState('');
       const [updateChecking, setUpdateChecking] = React.useState(false);
+      // Added in V2.1 after the existing slots for the same reason as above.
+      const [reviewLog, setReviewLog] = React.useState(() => loadReviewLog());
       const dockDragRef = React.useRef(null);
       const hostRef = React.useRef(null);
       const panelRootRef = React.useRef(null);
@@ -5409,6 +5763,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const progressBaseRef = React.useRef(0);
       const toggleRef = React.useRef(null);
       const requestHandoffRef = React.useRef(null);
+      const captureReviewRef = React.useRef(null);
+      const pendingReviewRef = React.useRef(null);
       const openRef = React.useRef(null);
       const handleReplyDoneRef = React.useRef(null);
       const handleTitleRef = React.useRef(null);
@@ -5644,11 +6000,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             }
             return;
           }
-          const title = tRef.current('notify.doneTitle');
-          const body = tRef.current('notify.doneBody', {
-            title: payload.title === '' ? tRef.current('web.title') : payload.title,
-            preview: payload.preview,
-          });
+          const review = payload.review === true;
+          const title = tRef.current(review ? 'review.notifyTitle' : 'notify.doneTitle');
+          const body = review
+            ? tRef.current('review.notifyBody', { preview: payload.preview })
+            : tRef.current('notify.doneBody', {
+                title: payload.title === '' ? tRef.current('web.title') : payload.title,
+                preview: payload.preview,
+              });
           const notification = new Notification(title, { body, silent: false });
           notification.onclick = () => {
             try {
@@ -5669,6 +6028,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       handleReplyDoneRef.current = (payload) => {
         if (payload === null || typeof payload !== 'object') return;
         const visibleNow = visibleRef.current && !document.hidden;
+        const pendingReview = reviewStore.getSnapshot();
+        if (pendingReview !== null && pendingReview.status === 'waiting') {
+          const ready = reviewStore.ready(payload);
+          if (ready !== null) {
+            track('dsc_review_ready', {});
+            if (visibleNow) {
+              showToast(tRef.current('review.readyToast'), [
+                { label: tRef.current('review.capture'), onClick: () => void captureReviewRef.current?.() },
+                { label: tRef.current('review.dismiss'), onClick: () => reviewStore.clear() },
+              ]);
+              return;
+            }
+            bumpUnread();
+            showSystemNotification({ ...payload, review: true });
+            return;
+          }
+        }
         if (visibleNow) {
           showToast(tRef.current('notify.inPanel'));
           return;
@@ -6352,6 +6728,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 sessionId: delivered.sessionId,
               }),
             );
+            const review = payload.review !== null && typeof payload.review === 'object' ? payload.review : null;
+            if (review !== null) {
+              setReviewLog(
+                recordReviewLog({
+                  id: String(review.sessionId) + '-' + String(review.messageId) + '-' + String(Date.now()),
+                  sessionId: review.sessionId,
+                  messageId: review.messageId,
+                  sessionTitle: review.sessionTitle,
+                  verdict: review.verdict,
+                  chars: payload.chars,
+                }),
+              );
+              reviewStore.clear();
+              track('dsc_review_captured', {});
+              if (review.verdict === 'clean') track('dsc_review_clean', {});
+              else if (review.verdict === 'issues') track('dsc_review_issues', {});
+            }
             const sendNow = payload.autoSend === true;
             const reveal = () => {
               if (docked) setDocked(false);
@@ -6397,7 +6790,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             ) {
               if (reveal()) {
                 const sessionId = delivered.sessionId;
-                const noticeText = t('handoff.returned', { count: payload.count, chars: payload.chars });
+                const noticeText =
+                  review !== null
+                    ? t('review.returned')
+                    : t('handoff.returned', { count: payload.count, chars: payload.chars });
                 window.setTimeout(() => {
                   if (typeof delivery.focus === 'function') delivery.focus(sessionId);
                   if (typeof delivery.notify !== 'function') return;
@@ -6420,7 +6816,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             const actions = [];
             actions.push({ label: t('back'), onClick: back });
             showToast(
-              t('handoff.doneStats', { count: payload.count, chars: payload.chars, tokens }),
+              review !== null
+                ? t('review.returnedStats', { chars: payload.chars, tokens })
+                : t('handoff.doneStats', { count: payload.count, chars: payload.chars, tokens }),
               actions,
             );
             return;
@@ -6498,6 +6896,25 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 ? delivery.currentSessionId()
                 : undefined;
             const targetSessionId = targets.length > 0 ? targets[0].id : current;
+            const reviewSource = pendingReviewRef.current;
+            const reviewMeta =
+              reviewSource === null || reviewSource === undefined
+                ? null
+                : {
+                    sessionId: reviewSource.sessionId,
+                    messageId: reviewSource.messageId,
+                    sessionTitle: reviewSource.sessionTitle,
+                    askedAt: reviewSource.askedAt,
+                    readyAt: reviewSource.readyAt,
+                    verdict: detectReviewVerdict(
+                      selected.map((message) => (typeof message.text === 'string' ? message.text : '')).join('\n\n'),
+                    ),
+                    mismatch: !sameReviewConversation(reviewSource.sourceUrl, sourceUrl),
+                  };
+            const preferredTarget =
+              reviewMeta !== null && targets.some((target) => target.id === reviewMeta.sessionId)
+                ? reviewMeta.sessionId
+                : targetSessionId;
             const defaults = settingsRef.current;
             const insertion =
               current !== undefined && current !== null && current !== ''
@@ -6521,8 +6938,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 total: captured.length,
               },
               targets,
-              targetSessionId: targetSessionId === undefined || targetSessionId === null ? '' : targetSessionId,
-              format: defaults.defaultFormat,
+              targetSessionId: preferredTarget === undefined || preferredTarget === null ? '' : preferredTarget,
+              format: reviewMeta === null ? defaults.defaultFormat : 'raw',
               template: 'none',
               safety: defaults.safety,
               showText: false,
@@ -6534,6 +6951,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               sourceTitle,
               maskedIds: [],
               editedText: null,
+              review: reviewMeta,
             });
             track('dsc_handoff_preview', { duration_ms: Math.max(0, Date.now() - startedAt) });
           } catch (cause) {
@@ -6620,7 +7038,24 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         open();
       }, [visible, open]);
 
+      const captureReview = React.useCallback((force) => {
+        const record = reviewStore.getSnapshot();
+        if (record === null || (record.status !== 'ready' && force !== true)) {
+          showToast(t('review.notReady'));
+          return;
+        }
+        if (busy || phase !== 'ready') {
+          showToast(t('review.notReady'));
+          return;
+        }
+        pendingReviewRef.current = record;
+        void runHandoff('last').finally(() => {
+          if (pendingReviewRef.current === record) pendingReviewRef.current = null;
+        });
+      }, [busy, phase, runHandoff, showToast, t]);
+
       runHandoffRef.current = runHandoff;
+      captureReviewRef.current = captureReview;
       toggleRef.current = toggle;
       requestHandoffRef.current = requestHandoff;
       openRef.current = open;
@@ -6632,6 +7067,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           setSettings(next);
           setHistory(loadHistory());
           setDraftOffer(loadDraft());
+          setReviewLog(loadReviewLog());
+          reviewStore.set(null);
           setHistoryOpen(false);
           setSettingsOpen(false);
         };
@@ -6989,10 +7426,15 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           }
           if (message.startsWith('__DSH_DSC_DRAFT__')) {
             try {
-              recordDraftMessage(JSON.parse(message.slice('__DSH_DSC_DRAFT__'.length)));
+              const draft = JSON.parse(message.slice('__DSH_DSC_DRAFT__'.length));
+              recordDraftMessage(draft);
+              if (draft !== null && typeof draft === 'object' && draft.text === '') reviewStore.markSent();
             } catch (error) {
               /* Malformed draft messages are ignored. */
             }
+          }
+          if (message.startsWith('__DSH_DSC_SENT__')) {
+            reviewStore.markSent();
           }
           if (message.startsWith('__DSH_DSC_ESC__')) {
             handleEscRef.current?.();
@@ -7167,6 +7609,24 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             if (result !== null && result !== undefined && result.ok === true) {
               showToast(t('review.filled'));
               track('dsc_review_filled', {});
+              const meta = pendingCompose.meta;
+              if (
+                pendingCompose.source === 'review' &&
+                meta !== null &&
+                meta !== undefined &&
+                meta.sessionId !== '' &&
+                meta.messageId !== ''
+              ) {
+                const pageUrl = (() => {
+                  try {
+                    return typeof view.getURL === 'function' ? normalizeSourceUrl(view.getURL()) : '';
+                  } catch (error) {
+                    return '';
+                  }
+                })();
+                reviewStore.arm({ ...meta, sourceUrl: pageUrl });
+                track('dsc_review_waiting', {});
+              }
               return;
             }
             if (result !== null && result !== undefined && result.reason === 'not-empty') {
@@ -7298,6 +7758,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               safety: preview.safety,
               format: previewFormat,
               template: previewTemplate,
+              ...(preview.review
+                ? {
+                    scope: t('review.scope'),
+                    instruction: t('review.instruction'),
+                  }
+                : {}),
             });
       const previewEditedText =
         preview !== null && typeof preview.editedText === 'string' ? preview.editedText : null;
@@ -7402,6 +7868,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           sourceTitle: preview.sourceTitle === undefined ? '' : preview.sourceTitle,
           insertPosition: previewInsertPosition === 'cursor' && preview.insertion ? 'cursor' : 'end',
           insertion: preview.insertion === undefined || preview.insertion === null ? null : preview.insertion,
+          review: preview.review === undefined || preview.review === null ? null : preview.review,
         });
       }, [
         preview,
@@ -7937,12 +8404,19 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         : null;
 
       const roles = { user: t('handoff.role.user'), assistant: t('handoff.role.assistant'), selection: t('handoff.menu.selection') };
+      const previewReview =
+        preview === null || preview.review === undefined || preview.review === null ? null : preview.review;
       const previewNode =
         preview === null
           ? null
           : h(
               'div',
-              { className: 'dsh-dsc-preview', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('preview.title') },
+              {
+                className: 'dsh-dsc-preview',
+                role: 'dialog',
+                'aria-modal': 'true',
+                'aria-label': previewReview === null ? t('preview.title') : t('review.previewTitle'),
+              },
               h(
                 'div',
                 { className: 'dsh-dsc-preview-card' },
@@ -7952,7 +8426,40 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                   h(
                     'div',
                     { className: 'dsh-dsc-preview-head-copy' },
-                    h('h2', { className: 'dsh-dsc-heading' }, t('preview.title')),
+                    h(
+                      'h2',
+                      { className: 'dsh-dsc-heading' },
+                      previewReview === null ? t('preview.title') : t('review.previewTitle'),
+                    ),
+                    previewReview === null
+                      ? null
+                      : h(
+                          'div',
+                          { className: 'dsh-dsc-preview-capture dsh-dsc-preview-review' },
+                          h('span', { className: 'dsh-dsc-review-badge' }, t('review.badge')),
+                          h(
+                            'span',
+                            { className: 'dsh-dsc-preview-capture-copy' },
+                            t('review.previewMeta', {
+                              title:
+                                previewReview.sessionTitle === '' || previewReview.sessionTitle === undefined
+                                  ? t('review.untitled')
+                                  : previewReview.sessionTitle,
+                              time: formatClock(new Date(Number(previewReview.readyAt) || Date.now())),
+                            }),
+                            previewReview.mismatch === true
+                              ? h('span', { className: 'dsh-dsc-preview-warn' }, ' · ' + t('review.mismatch'))
+                              : null,
+                          ),
+                          h(
+                            'span',
+                            {
+                              className: 'dsh-dsc-review-verdict',
+                              'data-clean': previewReview.verdict === 'clean' ? 'true' : undefined,
+                            },
+                            t('review.verdict.' + (previewReview.verdict || 'unknown')),
+                          ),
+                        ),
                     h(
                       'div',
                       { className: 'dsh-dsc-preview-target' },
@@ -8548,8 +9055,51 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                   ok: metric('dsc_handoff_ok'),
                   failed: metric('dsc_handoff_failed'),
                   undo: metric('dsc_undo'),
+                  review: metric('dsc_review_captured'),
                 }),
               ),
+              h('h3', { className: 'dsh-dsc-subheading' }, t('review.log.title')),
+              reviewLog.length === 0
+                ? h('p', { className: 'dsh-dsc-text' }, t('review.log.empty'))
+                : h(
+                    'div',
+                    { className: 'dsh-dsc-review-log' },
+                    reviewLog.slice(0, 5).map((row) =>
+                      h(
+                        'div',
+                        { key: row.id, className: 'dsh-dsc-review-log-row' },
+                        h('span', { className: 'dsh-dsc-review-log-time' }, formatStamp(new Date(row.at))),
+                        h(
+                          'span',
+                          {
+                            className: 'dsh-dsc-review-log-verdict',
+                            'data-clean': row.verdict === 'clean' ? 'true' : undefined,
+                          },
+                          t('review.verdict.' + row.verdict),
+                        ),
+                        h('span', { className: 'dsh-dsc-review-log-title' }, row.sessionTitle || t('review.untitled')),
+                        h('span', { className: 'dsh-dsc-review-log-chars' }, t('review.log.chars', { count: row.chars })),
+                      ),
+                    ),
+                  ),
+              reviewLog.length === 0
+                ? null
+                : h(
+                    'div',
+                    { className: 'dsh-dsc-footer-actions' },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-dsc-button',
+                        onClick: () => {
+                          setReviewLog(saveReviewLog([]));
+                          showToast(t('review.log.cleared'));
+                        },
+                      },
+                      t('review.log.clear'),
+                    ),
+                  ),
               h('h3', { className: 'dsh-dsc-subheading' }, t('settings.about')),
               h('p', { className: 'dsh-dsc-text' }, t('settings.versionLine', { version: PLUGIN_VERSION })),
               h('p', { className: 'dsh-dsc-text' }, updateStatusText(updateRecord, t)),
@@ -8830,6 +9380,46 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           )
         : null;
 
+      const reviewBanner =
+        reviewRecord !== null && !quick && phase === 'ready'
+          ? h(
+              'div',
+              { className: 'dsh-dsc-banner dsh-dsc-review-banner', role: 'status' },
+              h(
+                'span',
+                { className: 'dsh-dsc-banner-copy' },
+                reviewRecord.status === 'ready'
+                  ? t('review.banner.ready', {
+                      time: formatClock(new Date(reviewRecord.readyAt)),
+                      title:
+                        reviewRecord.sessionTitle === '' ? t('review.untitled') : reviewRecord.sessionTitle,
+                    })
+                  : t('review.banner.waiting', {
+                      title:
+                        reviewRecord.sessionTitle === '' ? t('review.untitled') : reviewRecord.sessionTitle,
+                    }),
+              ),
+              h(
+                'div',
+                { className: 'dsh-dsc-banner-actions' },
+                reviewRecord.status === 'ready'
+                  ? h('button', { type: 'button', onClick: () => captureReview() }, t('review.capture'))
+                  : h('button', { type: 'button', onClick: () => captureReview(true) }, t('review.captureNow')),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    onClick: () => {
+                      reviewStore.clear();
+                      track('dsc_review_dismissed', {});
+                    },
+                  },
+                  t('review.dismiss'),
+                ),
+              ),
+            )
+          : null;
+
       const healthBanner =
         health !== null && health.ok !== true && health.auth === 'in' && !healthDismissed
           ? h(
@@ -9055,6 +9645,22 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                       h('span', { className: 'dsh-dsc-menu-check' }, h(ChatGlyph, { size: 13 })),
                       h('span', null, t('menu.reverseNew')),
                     ),
+                    reviewRecord !== null && reviewRecord.status === 'ready'
+                      ? h(
+                          'button',
+                          {
+                            type: 'button',
+                            role: 'menuitem',
+                            className: 'dsh-dsc-menu-item',
+                            onClick: () => {
+                              setMenuOpen(false);
+                              captureReview();
+                            },
+                          },
+                          h('span', { className: 'dsh-dsc-menu-check' }, h(ReviewGlyph, { size: 13 })),
+                          h('span', null, t('review.menu')),
+                        )
+                      : null,
                     h(
                       'button',
                       {
@@ -9163,6 +9769,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 onKeyDown: keyDockResize,
               })
             : null,
+          reviewBanner,
           healthBanner,
           draftBanner,
           authBanner,
@@ -9304,7 +9911,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           return;
         }
         const prompt = buildReviewPrompt(result, t);
-        if (prompt === '' || !review(prompt)) {
+        const meta = {
+          sessionId,
+          messageId,
+          sessionTitle: typeof result.title === 'string' ? result.title : '',
+          chars: Number.isFinite(result.chars) ? result.chars : prompt.length,
+        };
+        if (prompt === '' || !review(prompt, meta)) {
           setError(t('review.error.empty'));
           setFailureCode('client/empty-prompt');
           return;
@@ -9382,7 +9995,16 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         leave();
       };
       const clearLocal = () => {
-        for (const key of [SETTINGS_KEY, HISTORY_KEY, METRICS_KEY, DRAFT_KEY, QUICK_RECT_KEY, UPDATE_KEY]) {
+        for (const key of [
+          SETTINGS_KEY,
+          HISTORY_KEY,
+          METRICS_KEY,
+          DRAFT_KEY,
+          QUICK_RECT_KEY,
+          UPDATE_KEY,
+          REVIEW_KEY,
+          REVIEW_LOG_KEY,
+        ]) {
           try {
             window.localStorage.removeItem(key);
           } catch (error) {
@@ -9390,6 +10012,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           }
         }
         historyStore.set([]);
+        reviewStore.set(null);
         updateStore.set(null);
         setUpdateRecord(null);
         try {
@@ -9434,6 +10057,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             ok: count('dsc_handoff_ok'),
             failed: count('dsc_handoff_failed'),
             undo: count('dsc_undo'),
+            review: count('dsc_review_captured'),
           }),
         ),
         h('p', { className: 'dsh-dsc-settings-copy' }, t('settings.pageClearHint')),
@@ -9786,8 +10410,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         openPanel();
       };
 
-      const requestReview = (text) => {
-        if (!composeStore.request(text, 'review')) return false;
+      const requestReview = (text, meta) => {
+        if (!composeStore.request(text, 'review', meta)) return false;
         track('dsc_review_request', { chars: text.length });
         if (panelControl !== null && typeof panelControl.review === 'function') {
           panelControl.review();
@@ -9902,6 +10526,15 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         formatClock,
         historyStore,
         composeStore,
+        reviewStore,
+        detectReviewVerdict,
+        sameReviewConversation,
+        normalizeReviewRecord,
+        loadReview,
+        normalizeReviewLogEntry,
+        loadReviewLog,
+        saveReviewLog,
+        recordReviewLog,
         buildReverseContext,
         fillComposerWithRetry,
         parseVersion,
