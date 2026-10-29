@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '2.1.0';
+    const PLUGIN_VERSION = '2.2.0';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -54,6 +54,8 @@ window.__ModuleLoader__.load({
     const REVIEW_TTL_MS = 2 * 60 * 60 * 1000;
     const REVIEW_LOG_LIMIT = 20;
     const REVIEW_STATUSES = ['waiting', 'ready'];
+    const CHECKPOINT_KEY = 'dsh-deepseek-web-chat.handoff-checkpoint.v1';
+    const CHECKPOINT_LIMIT = 50;
     const QUICK_MIN_WIDTH = 320;
     const QUICK_MIN_HEIGHT = 320;
     const NEW_CHAT_FILL_ATTEMPTS = 12;
@@ -842,6 +844,92 @@ window.__ModuleLoader__.load({
       return next;
     }
 
+    // --- Incremental handoff checkpoints (V2.2) -----------------------------
+    // One record per DeepSeek conversation: the key of the last message that was
+    // actually inserted into Harness. A later delta handoff reads only messages
+    // after that key, so a long discussion is not copied again.
+
+    /**
+     * Stable storage key for one DeepSeek conversation: origin + pathname, so
+     * query parameters added while switching chats do not lose the checkpoint.
+     */
+    function handoffCheckpointKey(url) {
+      const normalized = normalizeSourceUrl(url);
+      if (normalized === '') return '';
+      try {
+        const parsed = new URL(normalized);
+        return parsed.origin + parsed.pathname;
+      } catch (error) {
+        return normalized;
+      }
+    }
+
+    function normalizeHandoffCheckpoint(value) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+      const key = typeof value.key === 'string' ? value.key.trim().slice(0, 200) : '';
+      const at = Number(value.at);
+      if (key === '' || !Number.isFinite(at) || at <= 0) return null;
+      return {
+        key,
+        at: Math.round(at),
+        title: typeof value.title === 'string' ? value.title.trim().slice(0, 160) : '',
+        chars: Number.isFinite(Number(value.chars)) ? Math.max(0, Math.round(Number(value.chars))) : 0,
+      };
+    }
+
+    function loadHandoffCheckpoints() {
+      const raw = readJson(CHECKPOINT_KEY, {});
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+      const map = {};
+      for (const [url, value] of Object.entries(raw)) {
+        const normalized = handoffCheckpointKey(url);
+        const record = normalizeHandoffCheckpoint(value);
+        if (normalized !== '' && record !== null) map[normalized] = record;
+      }
+      return map;
+    }
+
+    function saveHandoffCheckpoints(map) {
+      const rows = [];
+      for (const [url, value] of Object.entries(map !== null && typeof map === 'object' ? map : {})) {
+        const normalized = handoffCheckpointKey(url);
+        const record = normalizeHandoffCheckpoint(value);
+        if (normalized !== '' && record !== null) rows.push([normalized, record]);
+      }
+      rows.sort((left, right) => right[1].at - left[1].at);
+      const next = {};
+      for (const [url, record] of rows.slice(0, CHECKPOINT_LIMIT)) next[url] = record;
+      writeJson(CHECKPOINT_KEY, next);
+      return next;
+    }
+
+    function loadHandoffCheckpoint(url) {
+      const normalized = handoffCheckpointKey(url);
+      if (normalized === '') return null;
+      const map = loadHandoffCheckpoints();
+      return Object.prototype.hasOwnProperty.call(map, normalized) ? map[normalized] : null;
+    }
+
+    function saveHandoffCheckpoint(url, record) {
+      const normalized = handoffCheckpointKey(url);
+      const entry = normalizeHandoffCheckpoint(record);
+      if (normalized === '' || entry === null) return null;
+      const map = loadHandoffCheckpoints();
+      map[normalized] = entry;
+      saveHandoffCheckpoints(map);
+      return entry;
+    }
+
+    function clearHandoffCheckpoint(url) {
+      const normalized = handoffCheckpointKey(url);
+      if (normalized === '') return false;
+      const map = loadHandoffCheckpoints();
+      if (!Object.prototype.hasOwnProperty.call(map, normalized)) return false;
+      delete map[normalized];
+      saveHandoffCheckpoints(map);
+      return true;
+    }
+
     function loadMetrics() {
       const raw = readJson(METRICS_KEY, null);
       if (raw === null || typeof raw !== 'object' || typeof raw.counts !== 'object' || raw.counts === null) {
@@ -1003,6 +1091,14 @@ window.__ModuleLoader__.load({
       'handoff.menu.last': '最后一条回复',
       'handoff.menu.round': '当前一轮问答',
       'handoff.menu.selection': '选中片段',
+      'handoff.menu.delta': '只接力上次之后',
+      'handoff.delta.hint': '只搬运上次接力之后的新消息；需要先成功接力过一次',
+      'handoff.delta.noCheckpoint': '这个对话还没有接力记录；先做一次整段接力，之后就能只搬新增内容。',
+      'handoff.delta.notFound': '找不到上次接力的位置（对话可能太长或页面已刷新）；请改用整段接力。',
+      'handoff.delta.tooLong': '对话太长，没能在 6 段内抓完；请改用整段接力，或分几次接力。',
+      'handoff.delta.empty': '上次接力之后没有新消息。',
+      'handoff.delta.badge': '增量',
+      'handoff.delta.banner': '上次接力 {time} · 之后新增 {count} 条',
       'handoff.busy': '正在读取 DeepSeek 对话…',
       'handoff.done': '已插入当前对话（{count} 条）',
       'handoff.doneWithTruncation': '已插入当前对话，但对话较长，可能不完整',
@@ -1042,6 +1138,7 @@ window.__ModuleLoader__.load({
       'auth.signIn': '去登录',
       'auth.persistHint': 'DSH 的浏览器分区不持久：重启应用后需要重新登录；可在系统浏览器打开以保持登录。',
       'preview.title': '接力到 Harness',
+      'preview.deltaTitle': '增量接力到 Harness',
       'preview.target': '插入到',
       'preview.untitled': '未命名会话',
       'preview.messages': '{count} 条消息',
@@ -1405,6 +1502,14 @@ window.__ModuleLoader__.load({
       'handoff.menu.last': 'Last reply',
       'handoff.menu.round': 'Current round',
       'handoff.menu.selection': 'Selected text',
+      'handoff.menu.delta': 'Only what is new',
+      'handoff.delta.hint': 'Hand off only the messages added since the last handoff; requires one successful handoff first',
+      'handoff.delta.noCheckpoint': 'No handoff yet in this chat. Do a full handoff once, then this can bring only the new messages.',
+      'handoff.delta.notFound': 'Could not find the last handoff position (the chat may be too long or the page reloaded). Use a full handoff instead.',
+      'handoff.delta.tooLong': 'The chat is too long to capture in six segments. Use a full handoff or hand off in parts.',
+      'handoff.delta.empty': 'No new messages since the last handoff.',
+      'handoff.delta.badge': 'Delta',
+      'handoff.delta.banner': 'Last handoff {time} · {count} new messages since',
       'handoff.busy': 'Reading the DeepSeek conversation…',
       'handoff.done': 'Added to the current conversation ({count} messages)',
       'handoff.doneWithTruncation': 'Added, but the conversation was long and may be incomplete',
@@ -1445,6 +1550,7 @@ window.__ModuleLoader__.load({
       'auth.persistHint':
         'DSH browser partitions are not persistent: signing in again is required after a restart; use the system browser to keep the session.',
       'preview.title': 'Hand off to Harness',
+      'preview.deltaTitle': 'Hand off new messages to Harness',
       'preview.target': 'Insert into',
       'preview.untitled': 'Untitled conversation',
       'preview.messages': '{count} messages',
@@ -2231,6 +2337,11 @@ window.__ModuleLoader__.load({
   justify-content: center;
   color: var(--dsw-alias-state-business-primary);
 }
+.dsh-dsc-delta-mark {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
 .dsh-dsc-toast {
   position: absolute;
   left: 50%;
@@ -2472,6 +2583,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   white-space: nowrap;
 }
 .dsh-dsc-review-verdict[data-clean='true'] { color: #2f8f5b; }
+.dsh-dsc-preview-delta {
+  border-style: solid;
+  border-color: color-mix(in srgb, #2f8f5b 32%, transparent);
+  background: color-mix(in srgb, #2f8f5b 9%, var(--dsw-alias-bg-base));
+}
+.dsh-dsc-delta-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, #2f8f5b 14%, transparent);
+  color: #2f8f5b;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
 .dsh-dsc-review-banner {
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, var(--dsw-alias-bg-base));
 }
@@ -4181,7 +4307,16 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return { mode: 'cursor', start, end: Math.min(end, draft.length) };
     }
 
-    function selectHandoffMessages(messages, mode) {
+    function selectHandoffMessages(messages, mode, options) {
+      if (mode === 'delta') {
+        const config = options !== null && typeof options === 'object' ? options : {};
+        const checkpoint = typeof config.checkpoint === 'string' ? config.checkpoint : '';
+        if (checkpoint === '') return messages;
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          if (messages[index].key === checkpoint) return messages.slice(index + 1);
+        }
+        return messages;
+      }
       if (mode === 'last') {
         for (let index = messages.length - 1; index >= 0; index -= 1) {
           if (messages[index].role === 'assistant') return [messages[index]];
@@ -6728,6 +6863,27 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 sessionId: delivered.sessionId,
               }),
             );
+            const lastMessage =
+              Array.isArray(payload.messages) && payload.messages.length > 0
+                ? payload.messages[payload.messages.length - 1]
+                : null;
+            let savedCheckpoint = null;
+            if (
+              payload.mode !== 'selection' &&
+              lastMessage !== null &&
+              typeof lastMessage.key === 'string' &&
+              lastMessage.key !== ''
+            ) {
+              const previousCheckpoint = loadHandoffCheckpoint(payload.sourceUrl);
+              saveHandoffCheckpoint(payload.sourceUrl, {
+                key: lastMessage.key,
+                at: Date.now(),
+                title: payload.sourceTitle,
+                chars: payload.chars,
+              });
+              savedCheckpoint = { url: payload.sourceUrl, previous: previousCheckpoint };
+              track('dsc_handoff_checkpoint', {});
+            }
             const review = payload.review !== null && typeof payload.review === 'object' ? payload.review : null;
             if (review !== null) {
               setReviewLog(
@@ -6780,6 +6936,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 ...delivered,
                 count: payload.count,
                 chars: payload.chars,
+                ...(savedCheckpoint === null
+                  ? {}
+                  : {
+                      checkpointUrl: savedCheckpoint.url,
+                      checkpointPrevious: savedCheckpoint.previous,
+                    }),
               });
             }
             if (
@@ -6846,6 +7008,20 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             showToast(handoffErrorText('unsupported'));
             return;
           }
+          if (mode === 'delta') {
+            // Skip the capture when the current conversation is identifiable and
+            // has no checkpoint yet; a root URL is left to the capture path.
+            let pageUrl = '';
+            try {
+              pageUrl = typeof view.getURL === 'function' ? view.getURL() : '';
+            } catch (error) {
+              pageUrl = '';
+            }
+            if (/\/a\/chat\/s\//.test(pageUrl) && loadHandoffCheckpoint(pageUrl) === null) {
+              showToast(t('handoff.delta.noCheckpoint'));
+              return;
+            }
+          }
           const startedAt = Date.now();
           const SEGMENT_TIMEOUT = 20000;
           setBusy(true);
@@ -6869,7 +7045,17 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             let done = result.done !== false;
             let atStart = result.atStart !== false;
             let segments = 1;
-            while (mode !== 'all' && mode !== 'selection' && !done && segments < 3) {
+            const sourceUrl = normalizeSourceUrl(result.url);
+            const deltaCheckpoint = mode === 'delta' ? loadHandoffCheckpoint(sourceUrl) : null;
+            const deltaKey = deltaCheckpoint === null ? '' : deltaCheckpoint.key;
+            if (mode === 'delta' && deltaKey === '') {
+              showToast(t('handoff.delta.noCheckpoint'));
+              return;
+            }
+            const deltaFound = () =>
+              deltaKey !== '' && captured.some((message) => message.key === deltaKey);
+            const maxSegments = mode === 'delta' ? 6 : 3;
+            while (mode !== 'all' && mode !== 'selection' && !done && segments < maxSegments) {
               progressBaseRef.current = captured.length;
               result = await captureSegment(view, mode, checkpoint, SEGMENT_TIMEOUT, remoteSelectorsRef.current);
               if (result.ok !== true) throw new Error(result.reason || 'handoff-failed');
@@ -6879,16 +7065,23 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               atStart = atStart && result.atStart !== false;
               segments += 1;
             }
-            if (mode !== 'all' && mode !== 'selection' && !done) {
+            if (mode === 'delta' && !done) {
+              showToast(t('handoff.delta.tooLong'));
+              return;
+            }
+            if (mode === 'delta' && !deltaFound()) {
+              showToast(t('handoff.delta.notFound'));
+              return;
+            }
+            if (mode !== 'all' && mode !== 'selection' && mode !== 'delta' && !done) {
               showToast(t('handoff.tooLong'));
               return;
             }
-            const selected = selectHandoffMessages(captured, mode);
+            const selected = selectHandoffMessages(captured, mode, { checkpoint: deltaKey });
             if (selected.length === 0) {
-              showToast(handoffErrorText('no-messages'));
+              showToast(mode === 'delta' ? t('handoff.delta.empty') : handoffErrorText('no-messages'));
               return;
             }
-            const sourceUrl = normalizeSourceUrl(result.url);
             const sourceTitle = cleanPageTitle(result.title);
             const targets = typeof listTargets === 'function' ? listTargets() : [];
             const current =
@@ -6923,7 +7116,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             setHistory(loadHistory());
             setPreview({
               mode,
-              truncated: !done || !atStart,
+              truncated: mode === 'delta' ? false : !done || !atStart,
               messages: selected.map((message, index) => ({
                 id: index,
                 key: typeof message.key === 'string' ? message.key : '',
@@ -6932,8 +7125,8 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 selected: true,
               })),
               capture: {
-                done,
-                atStart,
+                done: mode === 'delta' ? true : done,
+                atStart: mode === 'delta' ? true : atStart,
                 checkpoint,
                 total: captured.length,
               },
@@ -6952,6 +7145,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               maskedIds: [],
               editedText: null,
               review: reviewMeta,
+              delta:
+                mode === 'delta'
+                  ? { count: selected.length, at: deltaCheckpoint.at, title: deltaCheckpoint.title }
+                  : null,
             });
             track('dsc_handoff_preview', { duration_ms: Math.max(0, Date.now() - startedAt) });
           } catch (cause) {
@@ -7862,7 +8059,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           format: previewFormat,
           template: previewTemplate,
           truncated: preview.truncated === true,
-          messages: previewSelected.map((message) => ({ role: message.role, text: message.text })),
+          mode: preview.mode,
+          messages: previewSelected.map((message) => ({
+            role: message.role,
+            text: message.text,
+            key: typeof message.key === 'string' ? message.key : '',
+          })),
           hash: previewHash,
           sourceUrl: preview.sourceUrl === undefined ? '' : preview.sourceUrl,
           sourceTitle: preview.sourceTitle === undefined ? '' : preview.sourceTitle,
@@ -8406,6 +8608,14 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const roles = { user: t('handoff.role.user'), assistant: t('handoff.role.assistant'), selection: t('handoff.menu.selection') };
       const previewReview =
         preview === null || preview.review === undefined || preview.review === null ? null : preview.review;
+      const previewDelta =
+        preview === null || preview.delta === undefined || preview.delta === null ? null : preview.delta;
+      const previewTitle =
+        previewReview !== null
+          ? t('review.previewTitle')
+          : previewDelta !== null
+            ? t('preview.deltaTitle')
+            : t('preview.title');
       const previewNode =
         preview === null
           ? null
@@ -8415,7 +8625,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                 className: 'dsh-dsc-preview',
                 role: 'dialog',
                 'aria-modal': 'true',
-                'aria-label': previewReview === null ? t('preview.title') : t('review.previewTitle'),
+                'aria-label': previewTitle,
               },
               h(
                 'div',
@@ -8426,11 +8636,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                   h(
                     'div',
                     { className: 'dsh-dsc-preview-head-copy' },
-                    h(
-                      'h2',
-                      { className: 'dsh-dsc-heading' },
-                      previewReview === null ? t('preview.title') : t('review.previewTitle'),
-                    ),
+                    h('h2', { className: 'dsh-dsc-heading' }, previewTitle),
                     previewReview === null
                       ? null
                       : h(
@@ -8458,6 +8664,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                               'data-clean': previewReview.verdict === 'clean' ? 'true' : undefined,
                             },
                             t('review.verdict.' + (previewReview.verdict || 'unknown')),
+                          ),
+                        ),
+                    previewDelta === null
+                      ? null
+                      : h(
+                          'div',
+                          { className: 'dsh-dsc-preview-capture dsh-dsc-preview-delta' },
+                          h('span', { className: 'dsh-dsc-delta-badge' }, t('handoff.delta.badge')),
+                          h(
+                            'span',
+                            { className: 'dsh-dsc-preview-capture-copy' },
+                            t('handoff.delta.banner', {
+                              time: formatClock(new Date(Number(previewDelta.at) || Date.now())),
+                              count: previewSelected.length,
+                            }),
                           ),
                         ),
                     h(
@@ -9616,6 +9837,24 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
                         h('span', null, t('handoff.menu.' + mode)),
                       ),
                     ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        role: 'menuitem',
+                        className: 'dsh-dsc-menu-item',
+                        title: t('handoff.delta.hint'),
+                        onClick: () => {
+                          void runHandoff('delta');
+                        },
+                      },
+                      h(
+                        'span',
+                        { className: 'dsh-dsc-menu-check' },
+                        h('span', { className: 'dsh-dsc-delta-mark', 'aria-hidden': true }, '\u0394'),
+                      ),
+                      h('span', null, t('handoff.menu.delta')),
+                    ),
                     h('div', { className: 'dsh-dsc-menu-sep' }),
                     h(
                       'button',
@@ -9862,6 +10101,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
             ? delivery.undo(record)
             : { ok: false, reason: 'unsupported' };
         if (result.ok === true) {
+          if (typeof record.checkpointUrl === 'string' && record.checkpointUrl !== '') {
+            if (record.checkpointPrevious === null || record.checkpointPrevious === undefined) {
+              clearHandoffCheckpoint(record.checkpointUrl);
+            } else {
+              saveHandoffCheckpoint(record.checkpointUrl, record.checkpointPrevious);
+            }
+          }
           track('dsc_undo', {});
           undoStore.set(null);
           return;
@@ -10004,6 +10250,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           UPDATE_KEY,
           REVIEW_KEY,
           REVIEW_LOG_KEY,
+          CHECKPOINT_KEY,
         ]) {
           try {
             window.localStorage.removeItem(key);
@@ -10535,6 +10782,12 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         loadReviewLog,
         saveReviewLog,
         recordReviewLog,
+        normalizeHandoffCheckpoint,
+        loadHandoffCheckpoints,
+        saveHandoffCheckpoints,
+        loadHandoffCheckpoint,
+        saveHandoffCheckpoint,
+        clearHandoffCheckpoint,
         buildReverseContext,
         fillComposerWithRetry,
         parseVersion,

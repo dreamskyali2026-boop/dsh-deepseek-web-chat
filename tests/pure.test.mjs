@@ -105,6 +105,12 @@ const {
   loadReviewLog,
   saveReviewLog,
   recordReviewLog,
+  normalizeHandoffCheckpoint,
+  loadHandoffCheckpoints,
+  saveHandoffCheckpoints,
+  loadHandoffCheckpoint,
+  saveHandoffCheckpoint,
+  clearHandoffCheckpoint,
   buildReviewPrompt,
   reviewErrorText,
   reviewRouteUrl,
@@ -627,6 +633,7 @@ test('ChatPanel renders header, dock, toast and preview branches', () => {
     assert.match(flat, /dsh-dsc-panel-docked/);
     assert.match(flat, /dsh-dsc-resize/);
     assert.match(flat, /dsh-dsc-menu/);
+    assert.match(flat, /handoff\.menu\.delta/);
     assert.match(flat, /dsh-dsc-preview/);
     assert.match(flat, /preview\.partial/);
     assert.match(flat, /preview\.continue/);
@@ -974,7 +981,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '2.1.0');
+  assert.equal(parsed.version, '2.2.0');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -2283,8 +2290,8 @@ test('update records are validated, persisted and published', () => {
   assert.equal(normalizeUpdateRecord({ ok: true, version: '1.2.3' }), null);
   assert.equal(normalizeUpdateRecord(null), null);
   assert.equal(updateStatusOf(null), 'unchecked');
-  assert.equal(updateStatusOf({ ok: true, version: '2.2.0', checkedAt: 1 }), 'available');
-  assert.equal(updateStatusOf({ ok: true, version: '2.1.0', checkedAt: 1 }), 'current');
+  assert.equal(updateStatusOf({ ok: true, version: '2.3.0', checkedAt: 1 }), 'available');
+  assert.equal(updateStatusOf({ ok: true, version: '2.2.0', checkedAt: 1 }), 'current');
   assert.equal(updateStatusOf({ ok: false, version: '', checkedAt: 1 }), 'error');
 
   let notifications = 0;
@@ -2327,7 +2334,7 @@ test('refreshUpdate caches a fresh result and records failures', async () => {
   let calls = 0;
   const manifest = async () => {
     calls += 1;
-    return { ok: true, json: async () => ({ version: '2.2.0' }) };
+    return { ok: true, json: async () => ({ version: '2.3.0' }) };
   };
   assert.equal(await refreshUpdate({ force: true, fetch: manifest }), 'available');
   assert.equal(calls, 1);
@@ -2341,11 +2348,11 @@ test('refreshUpdate caches a fresh result and records failures', async () => {
 
 test('updateStatusText explains cached states without leaking anything', () => {
   const available = updateStatusText(
-    { ok: true, version: '2.2.0', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
+    { ok: true, version: '2.3.0', checkedAt: new Date(2026, 9, 29, 10, 0).getTime(), error: '' },
     t,
   );
   assert.match(available, /settings\.updateAvailable/);
-  assert.match(available, /version=2\.2\.0/);
+  assert.match(available, /version=2\.3\.0/);
   assert.equal(updateStatusText(null, t), 'settings.updateUnchecked');
   assert.equal(updateStatusText({ ok: false, version: '', checkedAt: 1, error: 'x' }, t), 'settings.updateError');
 });
@@ -2933,6 +2940,7 @@ test('inserting a review backfill records it and clears the pending state', asyn
   const previousWindow = globalThis.window;
   globalThis.window = { ...previousWindow, innerWidth: 1400, innerHeight: 900 };
   saveReviewLog([]);
+  window.localStorage.removeItem('dsh-deepseek-web-chat.handoff-checkpoint.v1');
   reviewStore.set({
     status: 'ready',
     sessionId: 's1',
@@ -2984,9 +2992,150 @@ test('inserting a review backfill records it and clears the pending state', asyn
     assert.equal(rows[0].sessionTitle, '需求讨论');
     assert.equal(rows[0].verdict, 'clean');
     assert.equal(reviewStore.getSnapshot(), null);
+    const checkpoint = loadHandoffCheckpoint('https://chat.deepseek.com/a/chat/s/1');
+    assert.equal(checkpoint.key, 'k1');
   } finally {
     saveReviewLog([]);
     reviewStore.set(null);
+    window.localStorage.removeItem('dsh-deepseek-web-chat.handoff-checkpoint.v1');
+    globalThis.window = previousWindow;
+  }
+});
+
+// --- V2.2: incremental handoff ---------------------------------------------
+
+test('delta selection starts after the checkpoint key', () => {
+  const messages = [
+    { key: 'a', role: 'user', text: '1' },
+    { key: 'b', role: 'assistant', text: '2' },
+    { key: 'c', role: 'user', text: '3' },
+    { key: 'd', role: 'assistant', text: '4' },
+  ];
+  assert.deepEqual(
+    selectHandoffMessages(messages, 'delta', { checkpoint: 'b' }).map((message) => message.key),
+    ['c', 'd'],
+  );
+  assert.equal(selectHandoffMessages(messages, 'delta', { checkpoint: 'd' }).length, 0);
+  assert.equal(selectHandoffMessages(messages, 'delta', { checkpoint: 'missing' }).length, 4);
+  assert.equal(selectHandoffMessages(messages, 'delta').length, 4);
+});
+
+test('handoff checkpoints persist per conversation and keep the newest entries', () => {
+  const previous = globalThis.window;
+  globalThis.window = fakeWindow;
+  try {
+    window.localStorage.removeItem('dsh-deepseek-web-chat.handoff-checkpoint.v1');
+    const url = 'https://chat.deepseek.com/a/chat/s/1';
+    saveHandoffCheckpoint(url, { key: 'k2', at: 2000, title: '讨论', chars: 120 });
+    const record = loadHandoffCheckpoint(url);
+    assert.equal(record.key, 'k2');
+    assert.equal(record.title, '讨论');
+    assert.equal(record.chars, 120);
+    saveHandoffCheckpoint(url + '?from=history', { key: 'k3', at: 3000 });
+    assert.equal(loadHandoffCheckpoint(url).key, 'k3');
+    assert.equal(clearHandoffCheckpoint(url), true);
+    assert.equal(loadHandoffCheckpoint(url), null);
+    assert.equal(loadHandoffCheckpoint('https://chat.deepseek.com/a/chat/s/2'), null);
+    assert.equal(saveHandoffCheckpoint('not-a-url', { key: 'x', at: 1 }), null);
+    assert.equal(normalizeHandoffCheckpoint({ key: '', at: 1 }), null);
+    assert.equal(normalizeHandoffCheckpoint({ key: 'x', at: 0 }), null);
+
+    const map = {};
+    for (let index = 0; index < 60; index += 1) {
+      map['https://chat.deepseek.com/a/chat/s/' + index] = { key: 'k' + index, at: 1000 + index };
+    }
+    const saved = saveHandoffCheckpoints(map);
+    assert.equal(Object.keys(saved).length, 50);
+    assert.equal(Object.keys(saved).includes('https://chat.deepseek.com/a/chat/s/9'), false);
+    assert.equal(Object.keys(saved).includes('https://chat.deepseek.com/a/chat/s/59'), true);
+  } finally {
+    window.localStorage.removeItem('dsh-deepseek-web-chat.handoff-checkpoint.v1');
+    globalThis.window = previous;
+  }
+});
+
+test('preview labels an incremental handoff and its checkpoint time', () => {
+  const refs = [];
+  const states = [];
+  let stateIndex = 0;
+  let refIndex = 0;
+  Object.assign(reactStub, {
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children: children.length <= 1 ? children[0] : children } };
+    },
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+      if (index === 0) states[index] = true;
+      if (index === 3) states[index] = 'ready';
+      if (index === 13) states[index] = 'in';
+      if (index === 11) {
+        states[index] = {
+          mode: 'delta',
+          truncated: false,
+          messages: [
+            { id: 0, key: 'c', role: 'user', text: '新问题', selected: true },
+            { id: 1, key: 'd', role: 'assistant', text: '新回答', selected: true },
+          ],
+          targets: [{ id: 's1', title: '当前会话' }],
+          targetSessionId: 's1',
+          format: 'raw',
+          template: 'none',
+          safety: true,
+          showText: true,
+          returnToHarness: true,
+          autoSend: false,
+          insertPosition: 'end',
+          insertion: null,
+          sourceUrl: 'https://chat.deepseek.com/a/chat/s/1',
+          sourceTitle: '来源讨论',
+          maskedIds: [],
+          editedText: null,
+          review: null,
+          delta: { count: 2, at: new Date(2026, 9, 29, 10, 30).getTime(), title: '来源讨论' },
+        };
+      }
+      const setter = (value) => {
+        states[index] = typeof value === 'function' ? value(states[index]) : value;
+      };
+      return [states[index], setter];
+    },
+    useRef(initial) {
+      const index = refIndex++;
+      if (!(index in refs)) refs[index] = { current: initial };
+      return refs[index];
+    },
+    useEffect() {},
+    useLayoutEffect() {},
+    useCallback(fn) {
+      return fn;
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { ...previousWindow, innerWidth: 1400, innerHeight: 900 };
+  try {
+    const panel = ChatPanel({
+      back() {},
+      open() {},
+      delivery: { currentSessionId() { return 's1'; }, deliver() { return { ok: false }; } },
+      listTargets() {
+        return [{ id: 's1', title: '当前会话', cwd: '/tmp' }];
+      },
+      t,
+      usePanelInfo(selector) {
+        return selector({ activePanelId: 'deepseek-web-chat' });
+      },
+    });
+    const flat = JSON.stringify(panel);
+    assert.match(flat, /preview\.deltaTitle/);
+    assert.match(flat, /dsh-dsc-preview-delta/);
+    assert.match(flat, /handoff\.delta\.badge/);
+    assert.match(flat, /handoff\.delta\.banner/);
+    assert.match(flat, /handoff\.menu\.delta/);
+  } finally {
     globalThis.window = previousWindow;
   }
 });
