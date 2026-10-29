@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const HISTORY_KEY = 'dsh-deepseek-web-chat.history.v1';
     const METRICS_KEY = 'dsh-deepseek-web-chat.metrics.v1';
     const SAFETY_TAG = 'deepseek-web-chat';
-    const PLUGIN_VERSION = '2.4.0';
+    const PLUGIN_VERSION = '2.4.1';
     const SELECTOR_VERSION = 1;
     const SELECTORS_KEY = 'dsh-deepseek-web-chat.selectors.v1';
     const SELECTORS_URL =
@@ -63,6 +63,7 @@ window.__ModuleLoader__.load({
     const CUSTOM_TEMPLATE_ID = /^custom:[a-z0-9-]{1,40}$/;
     const PET_KEY = 'dsh-deepseek-web-chat.pet.v1';
     const PET_POS_KEY = 'dsh-deepseek-web-chat.pet-pos.v1';
+    const PET_GLOBAL_POS_KEY = 'dsh-deepseek-web-chat.pet-global-pos.v1';
     const PET_NAME_MAX = 12;
     const PET_DAILY_XP_CAP = 40;
     const PET_LEVEL_XP = Object.freeze([0, 6, 16, 32, 56, 88, 128, 180, 240, 320]);
@@ -102,9 +103,11 @@ window.__ModuleLoader__.load({
       selectorUrl: SELECTORS_URL,
       pet: true,
       petName: '',
+      petScope: 'global',
       bossKey: true,
     });
     let panelControl = null;
+    let pendingQuick = false;
     let undoValue = null;
     const undoListeners = new Set();
     const undoStore = {
@@ -463,6 +466,8 @@ window.__ModuleLoader__.load({
         })(),
         pet: typeof raw.pet === 'boolean' ? raw.pet : DEFAULT_SETTINGS.pet,
         petName: (typeof raw.petName === 'string' ? raw.petName.trim() : '').slice(0, PET_NAME_MAX),
+        petScope:
+          raw.petScope === 'panel' || raw.petScope === 'global' ? raw.petScope : DEFAULT_SETTINGS.petScope,
         bossKey: typeof raw.bossKey === 'boolean' ? raw.bossKey : DEFAULT_SETTINGS.bossKey,
       };
     }
@@ -471,8 +476,39 @@ window.__ModuleLoader__.load({
       return normalizeSettings(readJson(SETTINGS_KEY, null));
     }
 
+    // The settings snapshot exists so frame-wide UI (the global pet) can react
+    // to a change made inside the panel without polling localStorage.
+    let settingsSnapshot = null;
+    const settingsListeners = new Set();
+
+    function getSettingsSnapshot() {
+      if (settingsSnapshot === null) settingsSnapshot = loadSettings();
+      return settingsSnapshot;
+    }
+
+    function subscribeSettings(listener) {
+      settingsListeners.add(listener);
+      return () => settingsListeners.delete(listener);
+    }
+
+    function publishSettings(value) {
+      const next = normalizeSettings(value);
+      settingsSnapshot = next;
+      for (const listener of [...settingsListeners]) {
+        try {
+          listener();
+        } catch (error) {
+          /* Settings listeners are best effort. */
+        }
+      }
+      return next;
+    }
+
     function saveSettings(settings) {
-      return writeJson(SETTINGS_KEY, normalizeSettings(settings));
+      const next = normalizeSettings(settings);
+      const written = writeJson(SETTINGS_KEY, next);
+      publishSettings(next);
+      return written;
     }
 
     // --- Whale pet and presentation cover (V2.4) ---------------------------
@@ -646,22 +682,27 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function normalizePetPos(value) {
+    function normalizePetPos(value, scope) {
+      const global = scope === 'global';
       const raw = value !== null && typeof value === 'object' ? value : {};
       const x = Number(raw.x);
       const y = Number(raw.y);
       return {
-        x: Math.min(0.96, Math.max(0.04, Number.isFinite(x) ? x : 0.9)),
-        y: Math.min(0.9, Math.max(0.12, Number.isFinite(y) ? y : 0.42)),
+        x: Math.min(global ? 0.95 : 0.96, Math.max(0.04, Number.isFinite(x) ? x : global ? 0.95 : 0.9)),
+        y: Math.min(0.9, Math.max(0.12, Number.isFinite(y) ? y : global ? 0.5 : 0.42)),
       };
     }
 
-    function loadPetPos() {
-      return normalizePetPos(readJson(PET_POS_KEY, null));
+    function petPosKey(scope) {
+      return scope === 'global' ? PET_GLOBAL_POS_KEY : PET_POS_KEY;
     }
 
-    function savePetPos(value) {
-      return writeJson(PET_POS_KEY, normalizePetPos(value));
+    function loadPetPos(scope) {
+      return normalizePetPos(readJson(petPosKey(scope), null), scope);
+    }
+
+    function savePetPos(value, scope) {
+      return writeJson(petPosKey(scope), normalizePetPos(value, scope));
     }
 
     function buildBossLog(seed, count) {
@@ -2016,6 +2057,10 @@ window.__ModuleLoader__.load({
       'menu.boss': '防投屏（Ctrl/⌘+Shift+H）',
       'settings.pet': '显示鲸鱼桌宠',
       'settings.petHint': 'DeepSeek 思考时它会下潜，回复完成时跃出水面；纯本地，不读取对话内容。',
+      'settings.petScope': '桌宠显示范围',
+      'settings.petScopeHint': '「所有页面」会一直停在窗口右侧；「仅面板」只在 DeepSeek 面板打开时出现。',
+      'settings.petScope.global': '所有页面（全局桌宠）',
+      'settings.petScope.panel': '仅 DeepSeek 面板',
       'settings.petName': '桌宠名字',
       'settings.petNameHint': '留空则叫「小鲸」，最多 12 个字。',
       'settings.bossKey': '启用防投屏快捷键',
@@ -2498,6 +2543,11 @@ window.__ModuleLoader__.load({
       'settings.pet': 'Show the whale desk pet',
       'settings.petHint':
         'It dives while DeepSeek thinks and leaps when a reply lands. Local only; it never reads the conversation.',
+      'settings.petScope': 'Pet visibility',
+      'settings.petScopeHint':
+        '"All screens" keeps it parked on the right edge everywhere; "Panel only" shows it while the DeepSeek panel is open.',
+      'settings.petScope.global': 'All screens (desk pet)',
+      'settings.petScope.panel': 'DeepSeek panel only',
       'settings.petName': 'Pet name',
       'settings.petNameHint': 'Leave empty for "Moby"; up to 12 characters.',
       'settings.bossKey': 'Enable the presentation cover shortcut',
@@ -3888,6 +3938,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
   transform: translate(-50%, -50%);
   pointer-events: auto;
   transition: width 160ms ease, height 160ms ease, opacity 160ms ease;
+}
+.dsh-dsc-pet-global {
+  position: fixed;
+  z-index: 40;
 }
 .dsh-dsc-pet-min { width: 26px; height: 26px; }
 .dsh-dsc-pet-button {
@@ -6806,9 +6860,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return '';
     }
 
-    function WhalePet({ t, settings, phase, onQuick, onHandoff }) {
+    function WhalePet({ t, settings, phase, scope = 'panel', onQuick, onHandoff }) {
       const ui = useUiSnapshot();
-      const [pos, setPos] = React.useState(() => loadPetPos());
+      const [pos, setPos] = React.useState(() => loadPetPos(scope));
       const [bubble, setBubble] = React.useState(false);
       const [minimized, setMinimized] = React.useState(false);
       const [mode, setMode] = React.useState(petInitialMode);
@@ -6851,14 +6905,28 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       const startDrag = (event) => {
         if (event.button !== 0) return;
         suppressClickRef.current = false;
-        const panel = event.currentTarget.closest('.dsh-dsc-panel');
-        if (panel === null) return;
-        const rect = panel.getBoundingClientRect();
+        const bounds = (() => {
+          if (scope === 'global') {
+            return {
+              left: 0,
+              top: 0,
+              width: Math.max(1, window.innerWidth),
+              height: Math.max(1, window.innerHeight),
+            };
+          }
+          const panel = event.currentTarget.closest('.dsh-dsc-panel');
+          if (panel === null) return null;
+          const rect = panel.getBoundingClientRect();
+          return {
+            left: rect.left,
+            top: rect.top,
+            width: Math.max(1, rect.width),
+            height: Math.max(1, rect.height),
+          };
+        })();
+        if (bounds === null) return;
         dragRef.current = {
-          left: rect.left,
-          top: rect.top,
-          width: Math.max(1, rect.width),
-          height: Math.max(1, rect.height),
+          ...bounds,
           startX: event.clientX,
           startY: event.clientY,
           startPos: posRef.current,
@@ -6879,10 +6947,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
         drag.moved = true;
         setPos(
-          normalizePetPos({
-            x: drag.startPos.x + dx / drag.width,
-            y: drag.startPos.y + dy / drag.height,
-          }),
+          normalizePetPos(
+            {
+              x: drag.startPos.x + dx / drag.width,
+              y: drag.startPos.y + dy / drag.height,
+            },
+            scope,
+          ),
         );
       };
 
@@ -6891,7 +6962,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         if (drag === null) return;
         dragRef.current = null;
         suppressClickRef.current = drag.moved;
-        if (drag.moved) savePetPos(posRef.current);
+        if (drag.moved) savePetPos(posRef.current, scope);
         try {
           event.currentTarget.releasePointerCapture(event.pointerId);
         } catch (error) {
@@ -6990,8 +7061,13 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
       return h(
         'div',
         {
-          className: 'dsh-dsc-pet' + (minimized ? ' dsh-dsc-pet-min' : ''),
-          style: { left: pos.x * 100 + '%', top: pos.y * 100 + '%' },
+          className:
+            'dsh-dsc-pet' + (scope === 'global' ? ' dsh-dsc-pet-global' : '') + (minimized ? ' dsh-dsc-pet-min' : ''),
+          style: {
+            left: pos.x * 100 + '%',
+            top: pos.y * 100 + '%',
+            ...(scope === 'global' ? { position: 'fixed' } : null),
+          },
           'data-mode': mode,
         },
         bubbleNode,
@@ -7042,6 +7118,24 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           mode === 'sleep' ? h('span', { className: 'dsh-dsc-pet-zzz', 'aria-hidden': true }, 'Zzz') : null,
         ),
       );
+    }
+
+    /**
+     * Frame-wide pet mount. It lives in `shell.overlay` rather than inside the
+     * DeepSeek panel, so it keeps swimming on any Harness screen; the panel
+     * itself mounts its own copy only when the user picks the panel scope.
+     */
+    function GlobalPet({ t, open, quick, handoff }) {
+      const settings = React.useSyncExternalStore(subscribeSettings, getSettingsSnapshot, getSettingsSnapshot);
+      if (settings.pet !== true || settings.petScope !== 'global') return null;
+      return h(WhalePet, {
+        t,
+        settings,
+        phase: 'ready',
+        scope: 'global',
+        onQuick: quick,
+        onHandoff: handoff,
+      });
     }
 
     function ChatPanelSeat() {
@@ -9107,6 +9201,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           },
         };
         panelControl = api;
+        if (pendingQuick) {
+          pendingQuick = false;
+          api.quick();
+        }
         return () => {
           if (panelControl === api) panelControl = null;
         };
@@ -10591,6 +10689,21 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
               settingsCheck('autoSend', 'settings.autoSend', 'settings.autoSendHint'),
               settingsCheck('pet', 'settings.pet', 'settings.petHint'),
               settingsRow(
+                'settings.petScope',
+                'settings.petScopeHint',
+                h(
+                  'select',
+                  {
+                    className: 'dsh-dsc-select',
+                    value: settings.petScope,
+                    onChange: (event) =>
+                      updateSetting('petScope', event.target.value === 'panel' ? 'panel' : 'global'),
+                  },
+                  h('option', { value: 'global' }, t('settings.petScope.global')),
+                  h('option', { value: 'panel' }, t('settings.petScope.panel')),
+                ),
+              ),
+              settingsRow(
                 'settings.petName',
                 'settings.petNameHint',
                 h('input', {
@@ -11560,7 +11673,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           settingsNode,
           historyNode,
           reverseNode,
-          settings.pet === true && visible && !quick
+          settings.pet === true && settings.petScope === 'panel' && visible && !quick
             ? h(WhalePet, {
                 t,
                 settings,
@@ -11909,6 +12022,7 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         historyStore.set([]);
         reviewStore.set(null);
         updateStore.set(null);
+        publishSettings(normalizeSettings({}));
         setBossVisible(false);
         emitPet('open');
         setUpdateRecord(null);
@@ -12115,6 +12229,9 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
           panelControl.quick();
           return;
         }
+        // The panel has not mounted yet (the pet lives on every screen): open
+        // it and let its first panel control turn this into the compact window.
+        pendingQuick = true;
         track('dsc_open', { source: 'quick' });
         openPanel();
       };
@@ -12307,6 +12424,18 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         ctx.slots.register(
           {
             name: 'shell.overlay',
+            id: 'deepseek-web-chat.pet',
+            order: 55,
+            locale: NS,
+            inject: () => ({ open: openPanel, quick: quickPanel, handoff: handoffPanel }),
+          },
+          GlobalPet,
+        ),
+      );
+      ctx.slots.inject('shell.overlay', () =>
+        ctx.slots.register(
+          {
+            name: 'shell.overlay',
             id: 'deepseek-web-chat.boss',
             order: 60,
             locale: NS,
@@ -12445,6 +12574,10 @@ button.dsh-dsc-auth:hover { background: var(--dsw-alias-interactive-bg-hover); }
         getPetMood,
         subscribePet,
         WhalePet,
+        GlobalPet,
+        getSettingsSnapshot,
+        subscribeSettings,
+        publishSettings,
         BossScreen,
         BossGlyph,
         PET_LEVEL_XP,

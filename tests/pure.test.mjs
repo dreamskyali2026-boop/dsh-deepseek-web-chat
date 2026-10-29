@@ -87,6 +87,9 @@ const {
   getBossVisible,
   setBossVisible,
   toggleBossVisible,
+  getSettingsSnapshot,
+  subscribeSettings,
+  publishSettings,
   PET_LEVEL_XP,
   PET_DAILY_XP_CAP,
   loadHistory,
@@ -1013,7 +1016,7 @@ test('diagnostics contain selectors and no conversation text', () => {
   };
   const text = buildDiagnostics(page, { stage: 'handoff' });
   const parsed = JSON.parse(text);
-  assert.equal(parsed.version, '2.4.0');
+  assert.equal(parsed.version, '2.4.1');
   assert.equal(parsed.stage, 'handoff');
   assert.equal(parsed.selectors.composer, false);
   assert.equal(typeof parsed.selectorFallback, 'object');
@@ -2323,7 +2326,7 @@ test('update records are validated, persisted and published', () => {
   assert.equal(normalizeUpdateRecord(null), null);
   assert.equal(updateStatusOf(null), 'unchecked');
   assert.equal(updateStatusOf({ ok: true, version: '9.9.9', checkedAt: 1 }), 'available');
-  assert.equal(updateStatusOf({ ok: true, version: '2.4.0', checkedAt: 1 }), 'current');
+  assert.equal(updateStatusOf({ ok: true, version: '2.4.1', checkedAt: 1 }), 'current');
   assert.equal(updateStatusOf({ ok: false, version: '', checkedAt: 1 }), 'error');
 
   let notifications = 0;
@@ -3382,11 +3385,14 @@ test('settings normalize pet and cover preferences', () => {
   const defaults = normalizeSettings({});
   assert.equal(defaults.pet, true);
   assert.equal(defaults.petName, '');
+  assert.equal(defaults.petScope, 'global');
   assert.equal(defaults.bossKey, true);
   const custom = normalizeSettings({ pet: false, petName: '  一只名字特别特别长的鲸鱼宝宝  ', bossKey: false });
   assert.equal(custom.pet, false);
   assert.equal(custom.bossKey, false);
   assert.equal(custom.petName.length, 12);
+  assert.equal(normalizeSettings({ petScope: 'panel' }).petScope, 'panel');
+  assert.equal(normalizeSettings({ petScope: 'nope' }).petScope, 'global');
 });
 
 test('pet position stays inside the panel', () => {
@@ -3394,6 +3400,32 @@ test('pet position stays inside the panel', () => {
   assert.deepEqual(normalizePetPos({ x: 0.5, y: 0.5 }), { x: 0.5, y: 0.5 });
   assert.deepEqual(normalizePetPos(null), { x: 0.9, y: 0.42 });
   assert.deepEqual(normalizePetPos({ x: 'nope' }), { x: 0.9, y: 0.42 });
+  assert.deepEqual(normalizePetPos(null, 'global'), { x: 0.95, y: 0.5 });
+  assert.deepEqual(normalizePetPos({ x: 9, y: 9 }, 'global'), { x: 0.95, y: 0.9 });
+});
+
+test('panel and global pets keep separate positions', () => {
+  savePetPos({ x: 0.2, y: 0.3 }, 'panel');
+  savePetPos({ x: 0.6, y: 0.7 }, 'global');
+  assert.deepEqual(loadPetPos('panel'), { x: 0.2, y: 0.3 });
+  assert.deepEqual(loadPetPos('global'), { x: 0.6, y: 0.7 });
+  savePetPos(null, 'global');
+  assert.deepEqual(loadPetPos('global'), { x: 0.95, y: 0.5 });
+  savePetPos(null, 'panel');
+  assert.deepEqual(loadPetPos('panel'), { x: 0.9, y: 0.42 });
+});
+
+test('settings changes publish to frame-wide listeners', () => {
+  const seen = [];
+  const unsubscribe = subscribeSettings(() => seen.push(getSettingsSnapshot().petScope));
+  try {
+    saveSettings({ ...loadSettings(), petScope: 'panel' });
+    saveSettings({ ...loadSettings(), petScope: 'global' });
+  } finally {
+    unsubscribe();
+    saveSettings(normalizeSettings({}));
+  }
+  assert.deepEqual(seen, ['panel', 'global']);
 });
 
 test('pet state and position persist locally', () => {
